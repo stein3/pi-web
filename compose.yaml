@@ -19,6 +19,7 @@ services:
     ports:
       - "3002:8124"
     volumes:
+      - pi-home:/home/node
       - ./config/pi-agent:/home/node/.pi/agent
       - ${HOST_WORKSPACE}:/workspace
       # webui dist lives in the sibling nopencode checkout (built once with
@@ -31,3 +32,6 @@ services:
       - OPENCODE_API_KEY=${OPENCODE_API_KEY}
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
+
+volumes:
+  pi-home:

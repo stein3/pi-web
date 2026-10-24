@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     python3 \
     ripgrep \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # --ignore-scripts per pi docs.
@@ -24,9 +25,12 @@ RUN chown -R node:node /app
 RUN mkdir -p /app/node_modules \
     && ln -s /usr/local/lib/node_modules/pi-tau-web-server /app/node_modules/pi-tau-web-server
 
-# Pi's config dir (~/.pi/agent): credentials, settings, extensions, sessions.
-# Must exist so a fresh mount point isn't root-owned.
-RUN mkdir -p /home/node/.pi/agent && chown -R node:node /home/node/.pi
+# Pi's config dir ~/.pi/agent (credentials, settings, sessions) and ~/.ssh must exist with the
+# right owner+mode before a mount lands on them, or they are created root-owned.
+# ssh also refuses keys unless ~/.ssh is 0700 and keys are 0600-owned-by-us.
+RUN mkdir -p /home/node/.pi/agent /home/node/.ssh \
+    && chmod 700 /home/node/.ssh \
+    && chown -R node:node /home/node/.pi /home/node/.ssh
 
 WORKDIR /workspace
 USER node
