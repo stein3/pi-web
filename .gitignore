@@ -1,0 +1,14 @@
+.env
+__pycache__/
+config/pi-agent/npm/node_modules/
+config/pi-agent/bin/
+config/pi-agent/auth.json
+config/pi-agent/models-store.json
+web/node_modules/
+web/.logs/
+web/.meta.json
+*.log
+compose.override.yml
+config/pi-agent/
+# Operator notes — private by design (hostnames, provider keys, LAN details).
+AGENTS.md
