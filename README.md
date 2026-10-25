@@ -42,8 +42,13 @@ Bare metal (`pi` on PATH, `pi-tau-web-server` resolvable):
 
 ```bash
 cd web && npm install && ./launch.sh 8124
-node pi-web.mjs --port 8124 --dir ~/.pi/agent --cwd /workspace   # same thing
+node pi-web.mjs --port 8124 --dir ~/.pi/agent --cwd "$PWD"   # same thing, explicit
 ```
+
+Defaults are derived from where `pi-web.mjs` lives: the webui dist is the sibling
+clone (`../opencode/webui/dist`), the agent dir is `../config/pi-agent`. Override
+with `--dist` / `WEBUI_DIST` and `--dir` / `PI_CODING_AGENT_DIR` if your layout
+differs (the container always passes both explicitly).
 
 ## Configuration
 
@@ -84,14 +89,25 @@ scratch agent dir. No browser, no model, no network.
 | `compact-check` | `/summarize` → pi `compact`: answers before the edge timeout, never sticks the UI busy, one error surface |
 | `stream-check` | SSE census (`session.updated` must stay rare) + the reaper/id contract (reaped uuid and legacy tau id both resume; one row, one child) |
 
-Operator-local extras (they need a running server, and `ws-check`/`ui-check`
-import the sibling nopencode e2e helper by absolute path):
+Operator-local extras — they drive a server you start yourself, and they exit **2**
+(never a silent pass) when their tooling isn't installed:
 
 ```bash
 # queue-check — ordering the engine owns, HTTP + SSE only
 PATH=$PWD/.testbin:$PATH PI_CODING_AGENT_DIR=/tmp/queue-agent node pi-web.mjs --port 8127 &
 BASE_URL=http://127.0.0.1:8127 node .testbin/queue-check.mjs
+
+# ws-check / ui-check — the real webui in chromium; needs the sibling checkout's
+# e2e helpers (E2E_HELPERS=<path/to/e2e/helpers/setup.mjs>, CHROMIUM_PATH=…)
+BASE_URL=http://127.0.0.1:8126 node .testbin/ws-check.mjs
+
+# time-check — reads a real transcript, so point it at a scratch agent dir
+PI_CODING_AGENT_DIR=/tmp/piwtest/pi-agent BASE_URL=http://127.0.0.1:8127 node .testbin/time-check.mjs
 ```
+
+Nothing in `web/.testbin/` hard-codes an operator's directory any more: paths
+come from `.testbin/harness.mjs` (`REPO`, `SHOTS`, `E2E_HELPERS`, `sessionSlug`),
+and the fixtures' workspace is this repo unless `CHECK_CWD=` says otherwise.
 
 Every check accepts a build override for A/B against an older tree —
 `PI_WEB_SCRIPT=` (diff/compact), `PI_WEB_JS=` (delete/stream), plus

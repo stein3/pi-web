@@ -1,8 +1,25 @@
 // Headless check: real webui (dist) against pi-web on :8125 with the fake pi.
-import { launchBrowser, BASE, sleep, poll } from '/workspace/opencode/e2e/helpers/setup.mjs'
+// Needs a running pi-web (BASE_URL), the sibling nopencode e2e helpers and
+// chromium — and exits 2 (never a silent 0) when that tooling isn't here.
+import { loadE2E, browserSkip, shotsDir } from './harness.mjs'
 
-const shots = '/workspace/pi-local/web/.logs'
-const browser = await launchBrowser()
+let e2e
+try {
+  e2e = await loadE2E()
+} catch (e) {
+  console.log(e.message)
+  process.exit(e.skip ? 2 : 1)
+}
+const { launchBrowser, BASE, sleep, poll } = e2e
+
+const shots = shotsDir()
+let browser
+try {
+  browser = await launchBrowser()
+} catch (e) {
+  console.log(browserSkip(e) ?? e?.stack ?? String(e))
+  process.exit(browserSkip(e) ? 2 : 1)
+}
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
 const errors = []
 page.on('pageerror', (e) => errors.push(String(e)))

@@ -6,14 +6,41 @@
 // `time.created` / `time.completed` / part `state.time` alone.
 //
 //   BASE_URL=http://127.0.0.1:8127 \
-//   SESSIONS_DIR=/workspace/.scratch/piwtest/pi-agent/sessions \
-//   node .testbin/time-check.mjs
+//   PI_CODING_AGENT_DIR=/tmp/piwtest/pi-agent node .testbin/time-check.mjs
+// It reads a REAL pi-web transcript (not the fake pi), so it exits 2 rather than
+// pretending when there is nothing to read. One assertion — 'no message stamped
+// now' — needs a live REAL pi child, because the fake pi answers prompts but
+// never writes JSONL; against the fake pi that single check fails by design.
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:8127'
 const SESSIONS_DIR =
-  process.env.SESSIONS_DIR || '/workspace/.scratch/piwtest/pi-agent/sessions'
+  process.env.SESSIONS_DIR ||
+  path.join(process.env.PI_CODING_AGENT_DIR || path.join(os.tmpdir(), 'piwtest', 'pi-agent'), 'sessions')
+if (!fs.existsSync(SESSIONS_DIR)) {
+  console.log(
+    `SKIP: no sessions dir at ${SESSIONS_DIR}\n` +
+      '  start pi-web against a scratch agent dir, run a few turns, then point\n' +
+      '  PI_CODING_AGENT_DIR (or SESSIONS_DIR) at it and BASE_URL at the server.',
+  )
+  process.exit(2)
+}
+
+// Preflight: without the API side every assertion below is noise, and a red
+// FAIL that is really just 'no server running' teaches nobody anything.
+try {
+  const ping = await fetch(BASE + '/healthz')
+  if (!ping.ok) throw new Error(`HTTP ${ping.status}`)
+} catch (e) {
+  console.log(
+    `SKIP: no pi-web at ${BASE} (${e?.message ?? e}) — run it with PI_CODING_AGENT_DIR\n` +
+      '  pointed at the same agent dir you point SESSIONS_DIR at.',
+  )
+  process.exit(2)
+}
+console.log(`sessions dir: ${SESSIONS_DIR}`)
 
 let failed = 0
 const check = (ok, label) => {

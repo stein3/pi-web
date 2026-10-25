@@ -11,12 +11,13 @@
 // Self-contained: seeds a scratch pi dir from generated fixtures, spawns pi-web
 // against the fake pi, asserts over the HTTP API, then kills the child.
 //
-//   cd /workspace/pi-local/web && node .testbin/delete-check.mjs
+//   cd web && node .testbin/delete-check.mjs
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { REPO_CWD, sessionSlug } from './harness.mjs'
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const TESTBIN = path.join(WEB, '.testbin')
@@ -25,8 +26,8 @@ const TESTBIN = path.join(WEB, '.testbin')
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.DEL_CHECK_PORT || 8127)
 const BASE = `http://127.0.0.1:${PORT}`
-const WS_SLUG = '--workspace-pi-local--' // cwd below, pi-encoded
-const CWD = '/workspace/pi-local'
+const CWD = REPO_CWD // the workspace the fixtures live in; CHECK_CWD overrides
+const WS_SLUG = sessionSlug(CWD) // pi's own cwd -> session-dir encoding
 
 let failed = 0
 const check = (ok, label) => {

@@ -4,10 +4,31 @@
 // session born with the picked cwd).
 //
 //   BASE_URL=http://127.0.0.1:8126 node .testbin/ws-check.mjs
-import { launchBrowser, BASE, sleep, poll } from '/workspace/opencode/e2e/helpers/setup.mjs'
+import path from 'node:path'
+import { loadE2E, browserSkip, shotsDir, REPO } from './harness.mjs'
 
-const shots = '/workspace/pi-local/web/.logs'
-const browser = await launchBrowser()
+let e2e
+try {
+  e2e = await loadE2E()
+} catch (e) {
+  console.log(e.message)
+  process.exit(e.skip ? 2 : 1)
+}
+const { launchBrowser, BASE, sleep, poll } = e2e
+
+const shots = shotsDir()
+let browser
+try {
+  browser = await launchBrowser()
+} catch (e) {
+  console.log(browserSkip(e) ?? e?.stack ?? String(e))
+  process.exit(browserSkip(e) ? 2 : 1)
+}
+
+// the workspace this check runs in is the repo itself, so nothing here hard-
+// codes an operator's directory layout
+const REPO_NAME = path.basename(REPO)
+const TYPE_AHEAD = path.join(path.dirname(REPO), REPO_NAME.slice(0, 3))
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
 const errors = []
 page.on('pageerror', (e) => errors.push(String(e)))
@@ -55,27 +76,27 @@ try {
   await sleep(400)
   check((await dialog.locator('.chip').count()) > 0, 'picker shows project chips')
 
-  await page.locator('#ws-cwd').fill('/workspace/pi')
+  await page.locator('#ws-cwd').fill(TYPE_AHEAD)
   await poll(
-    async () => (await dialog.locator('.acrow').allInnerTexts()).join('|').includes('pi-local'),
+    async () => (await dialog.locator('.acrow').allInnerTexts()).join('|').includes(REPO_NAME),
     3000,
   )
   const acText = (await dialog.locator('.acrow').allInnerTexts()).join('|')
-  check(acText.includes('pi-local'), `type-ahead lists dirs (${acText.replace(/\n/g, ' ').slice(0, 90)})`)
+  check(acText.includes(REPO_NAME), `type-ahead lists dirs (${acText.replace(/\n/g, ' ').slice(0, 90)})`)
   await page.screenshot({ path: shots + '/ws-picker.png' })
 
   // accept the highlighted completion (↓ then ↵), then ↵ starts the session
   await page.keyboard.press('ArrowDown')
   await page.keyboard.press('Enter')
   const accepted = await page.locator('#ws-cwd').inputValue()
-  check(accepted === '/workspace/pi-local/', `completion accepted (${accepted})`)
+  check(accepted === `${REPO}/`, `completion accepted (${accepted})`)
   await page.keyboard.press('Enter')
   await poll(() => dialog.count().then((n) => n === 0), 3000)
 
   // 5. the pending tab carries the picked workspace
   const activeWs = page.locator('.tab.active .ws')
   check((await activeWs.count()) === 1, 'pending tab has a workspace chip')
-  check((await activeWs.first().innerText()) === 'pi-local', 'chip shows picked dir')
+  check((await activeWs.first().innerText()) === REPO_NAME, 'chip shows picked dir')
 
   // 6. first message realizes the session with that cwd
   const input = page.locator('textarea:visible, [contenteditable="true"]:visible').first()
@@ -101,7 +122,7 @@ try {
   await sleep(500)
 
   const live = await page.request.get(BASE + '/oc/session').then((r) => r.json())
-  const born = live.find((s) => s.cwd === '/workspace/pi-local')
+  const born = live.find((s) => s.cwd === REPO)
   check(!!born, 'session created with the picked cwd')
   await page.screenshot({ path: shots + '/ws-final.png' })
 } catch (e) {

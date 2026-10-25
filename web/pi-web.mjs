@@ -34,8 +34,10 @@
  * edit-diff block IS wired — pi's tool `details.patch` is mapped to opencode's
  * `state.metadata.filediff.patch` by `toolMetadata()`.
  *
- * Usage:  node pi-web.mjs [--port 8124] [--cwd /workspace] [--dir ~/.pi/agent]
- *                         [--dist /workspace/opencode/webui/dist]
+ * Usage:  node pi-web.mjs [--port 8124] [--host 0.0.0.0] [--cwd <workspace>]
+ *                         [--dir <agentDir>] [--dist <webui/dist>]
+ * Every default is derived from where this file lives (see WEBUI_DIST /
+ * PI_AGENT_DIR below) or comes from the matching PI_* env var.
  */
 
 import http from 'node:http'
@@ -58,8 +60,15 @@ const arg = (name, def) => {
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(arg('port', process.env.PI_WEB_PORT || 8124))
 const HOST = arg('host', process.env.PI_WEB_HOST || '0.0.0.0')
+// The webui is a sibling clone (nopencode), so the default dist is relative to
+// this file, not to one machine's checkout: <repo>/web -> up two -> opencode.
+// The container always passes --dist /app/webui; the derived default is for
+// bare-metal runs.
 const WEBUI_DIST = path.resolve(
-  arg('dist', process.env.WEBUI_DIST || '/workspace/opencode/webui/dist'),
+  arg(
+    'dist',
+    process.env.WEBUI_DIST || path.join(HERE, '..', '..', 'opencode', 'webui', 'dist'),
+  ),
 )
 const PI_CWD = path.resolve(arg('cwd', process.env.PI_CWD || '/workspace'))
 const PI_AGENT_DIR = path.resolve(

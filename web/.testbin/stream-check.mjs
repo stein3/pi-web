@@ -22,22 +22,23 @@
 // from JSONL, the history row keeps the id the browser holds (otherwise one
 // session becomes two rows/tabs), and a POST prompt still lands.
 //
-//   cd /workspace/pi-local/web && node .testbin/stream-check.mjs
-//   PI_WEB_JS=/app/pi-web.mjs CENSUS_ONLY=1 node .testbin/stream-check.mjs   # A/B baseline
+//   cd web && node .testbin/stream-check.mjs
+//   PI_WEB_JS=<other build> CENSUS_ONLY=1 node .testbin/stream-check.mjs   # A/B baseline
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { REPO_CWD, sessionSlug } from './harness.mjs'
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const TESTBIN = path.join(WEB, '.testbin')
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.STREAM_CHECK_PORT || 8127)
 const BASE = `http://127.0.0.1:${PORT}`
-const CWD = '/workspace/pi-local'
-const WS_SLUG = '--workspace-pi-local--'
+const CWD = REPO_CWD // CHECK_CWD overrides; the fixtures live in this workspace
+const WS_SLUG = sessionSlug(CWD) // pi's own cwd -> session-dir encoding
 
 const WORDS = Number(process.env.STREAM_WORDS || 120)
 const DELTA_MS = Number(process.env.STREAM_DELTA_MS || 4)
