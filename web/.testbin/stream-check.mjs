@@ -209,9 +209,12 @@ try {
   )
 
   check(deltas.length >= WORDS, `token deltas streamed (${deltas.length} >= ${WORDS})`)
-  const deltaText = deltas.map((f) => f.properties.delta).join('')
-  check(deltaText === EXPECT, 'delta frames rebuild the assistant text exactly')
   const lastSnap = [...mine].reverse().find((f) => f.type === 'message.part.updated' && f.properties?.part?.type === 'text')
+  // the turn now opens with a thinking block (as real pi does), so "rebuild the
+  // assistant text" must select the ANSWER part, not every delta on the wire
+  const answerPid = lastSnap?.properties?.part?.id
+  const deltaText = deltas.filter((f) => f.properties?.partID === answerPid).map((f) => f.properties.delta).join('')
+  check(deltaText === EXPECT, 'delta frames rebuild the assistant text exactly')
   check(lastSnap?.properties?.part?.text === EXPECT, 'final text snapshot agrees with the delta sum (no double-append)')
   // THE regression: session.updated must stay a metadata event, not a per-token echo.
   check(sessUpdated <= 4, `session.updated stays rare (${sessUpdated} for ${deltas.length} deltas)`)

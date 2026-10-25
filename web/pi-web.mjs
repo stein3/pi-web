@@ -234,6 +234,10 @@ function entryFor(tauId) {
       file: null, // last sessionFile seen (drives the canonical-uuid alias)
       armed: false,
       queue: { steering: [], followUp: [] },
+      // compactions this bridge SAW happen inside the live child (compaction_end
+      // carries the summary; tau's entries never record it). See transcriptEntries().
+      compactions: [],
+      level: null, // last thinking level this bridge asked pi for (webui variant)
     }
     live.set(tauId, e)
   }
@@ -370,6 +374,82 @@ function messagesOf(entries) {
   return (entries ?? []).filter((e) => e?.type === 'message' && e.message)
 }
 
+/**
+ * pi's `compaction` entries — the OTHER kind of transcript row.
+ *
+ * `compact()` (manual `/compact`, or auto at the context ceiling) appends a
+ * `compaction` entry holding the generated summary + `firstKeptEntryId` +
+ * `tokensBefore`. Projecting only `type: "message"` — which is what opencode's
+ * transcript vocabulary has — threw that text away: a compacted session read
+ * back with no sign it had ever been compacted. This is the only place the
+ * summary exists, and pi never re-emits it as a message.
+ *
+ * There is no compaction row type in the shared webui, so it lands as a normal
+ * assistant message with a bold header line: the markdown renderer gives it a
+ * heading, and it stays recognisable in a copied transcript too. `role: user`
+ * would label it "you" and hand it a revert/fork button — wrong for generated
+ * text — so it takes the role that actually produced it.
+ *
+ * The id is derived from the two fields BOTH surfaces carry (`firstKeptEntryId`
+ * + `tokensBefore`), not from the timestamp: the live `compaction_end` event
+ * has no timestamp, and a live row and the file row must be the SAME message id
+ * or the post-idle refetch would duplicate/swap the row. `tokensBefore` grows
+ * monotonically, so two compactions can never collide.
+ */
+function compactionId(entry) {
+  return `cmp_${sha12(`${entry?.firstKeptEntryId ?? ''}|${entry?.tokensBefore ?? ''}`)}`
+}
+
+function compactionRow(entry) {
+  const mid = compactionId(entry)
+  const created = Date.parse(entry.timestamp ?? '') || 0
+  const before = Number(entry.tokensBefore)
+  const head = `⟳ Context compacted${Number.isFinite(before) ? ` — ${before.toLocaleString('en-US')} tokens summarised` : ''}`
+  const summary = String(entry.summary ?? '').trim()
+  return {
+    id: mid,
+    role: 'assistant',
+    time: { created, completed: created },
+    // pi stamps usage on the entry; the webui's token tally reads `tokens`
+    tokens: entry.usage
+      ? {
+          input: entry.usage.input ?? 0,
+          output: entry.usage.output ?? 0,
+          reasoning: entry.usage.reasoning ?? 0,
+          cache: { read: entry.usage.cacheRead ?? 0, write: entry.usage.cacheWrite ?? 0 },
+        }
+      : undefined,
+    compacted: true, // for checks/clients; normalizeMessages drops unknown keys
+    parts: [
+      {
+        id: `${mid}:0`,
+        type: 'text',
+        text: summary ? `**${head}**\n\n${summary}` : `**${head}**`,
+        synthetic: true,
+      },
+    ],
+  }
+}
+
+/**
+ * The transcript source for a session.
+ *
+ * A resumed child gets its entries from pi-web's own `readJsonl()` (tau stores
+ * what it is handed), so file-side `compaction` entries are already in there.
+ * But tau only records `message_start`/`message_end` (`trackMessage`), so a
+ * compaction that happens INSIDE a live child never reaches `s.entries` — it
+ * would disappear on the very next refetch and only reappear once the child was
+ * reaped and the file re-read. Live compactions are therefore kept here and
+ * merged in, deduped by id against the file copy.
+ */
+function transcriptEntries(s, e) {
+  const base = s?.entries ?? []
+  const extra = e?.compactions ?? []
+  if (!extra.length) return base
+  const seen = new Set(base.filter((x) => x?.type === 'compaction').map(compactionId))
+  return [...base, ...extra.filter((c) => !seen.has(compactionId(c)))]
+}
+
 // ---------------------------------------------------------------------------
 // pi message -> opencode message (the one real translation)
 // ---------------------------------------------------------------------------
@@ -462,14 +542,28 @@ function toolTitle(name, input) {
  * toolResult is consumed here for the join.
  */
 function toOcMessages(entries) {
-  const msgs = messagesOf(entries).map((e) => e.message)
+  const list = entries ?? []
+  // the join map is built over the WHOLE session first: pi writes the
+  // toolResult message after the assistant message that called it
+  const msgs = messagesOf(list).map((e) => e.message)
   const results = new Map()
   for (const m of msgs) if (m.role === 'toolResult' && m.toolCallId) results.set(m.toolCallId, m)
 
+  // message ids stay exactly what the message-only walk produced: same order,
+  // same dupSeen counter, so live ids keep matching the read path
   const dupSeen = new Map()
   const out = []
-  for (const m of msgs) {
-    if (!LIVE_ROLES.has(m.role)) continue
+  const seenCompaction = new Set()
+  for (const entry of list) {
+    if (entry?.type === 'compaction') {
+      const row = compactionRow(entry)
+      if (seenCompaction.has(row.id)) continue // live record + file entry = one row
+      seenCompaction.add(row.id)
+      out.push(row)
+      continue
+    }
+    const m = entry?.type === 'message' ? entry.message : null
+    if (!m || !LIVE_ROLES.has(m.role)) continue
     const mid = msgId(m.role, m.timestamp, dupSeen)
     out.push(toOcMessage(m, mid, results))
   }
@@ -880,6 +974,36 @@ function onPiEvent(tauId, ev) {
   }
   if (t === 'compaction_end' || t === 'summarization_retry_finished') {
     emitFor(tauId, 'session.next.compaction.ended', { sessionID: tauId })
+    // The summary itself is transcript content, and it arrives ONLY here: pi
+    // appends a `compaction` entry to its JSONL and never replays it as a
+    // message, and tau's entries only ever hold message events. Record it so
+    // the read path can project it, then ship the row live so the open tab
+    // shows it without a reload. Same id the file entry will produce.
+    const done = !ev.aborted && !ev.errorMessage && ev.result?.summary
+    if (done) {
+      const entry = {
+        type: 'compaction',
+        timestamp: new Date().toISOString(),
+        summary: ev.result.summary,
+        firstKeptEntryId: ev.result.firstKeptEntryId,
+        tokensBefore: ev.result.tokensBefore,
+        usage: ev.result.usage,
+      }
+      const known = e.compactions.some((c) => compactionId(c) === compactionId(entry))
+      if (!known) e.compactions.push(entry)
+      const alreadyIn =
+        known || (session?.entries ?? []).some((x) => x?.type === 'compaction' && compactionId(x) === compactionId(entry))
+      if (!alreadyIn) {
+        // same order the message_end resync uses: parts first, then the info
+        // that materializes the row (setMeta seeds `parts` from info too)
+        const row = compactionRow(entry)
+        for (const p of row.parts) emitFor(tauId, 'message.part.updated', { part: { ...p, messageID: row.id, sessionID: tauId } })
+        emitFor(tauId, 'message.updated', { info: { ...row, sessionID: tauId } })
+      }
+      // committed: the webui clears `compacting` on this event and schedules the
+      // transcript refetch that picks the summary row up from the read path
+      emitFor(tauId, 'session.compacted', { sessionID: tauId })
+    }
     // A manual compaction ends the summary, NOT a run: pi's compact() aborts
     // whatever was live FIRST, so agent_settled (our only session.idle source)
     // already landed before compaction_start. Without an idle here the webui's
@@ -1488,6 +1612,31 @@ function readJson(p) {
 }
 
 /** Providers parsed out of pi's models-store.json; [] when there is no store. */
+// pi's thinking levels (core/defaults.js). `xhigh`/`max` exist for a model ONLY
+// when it maps them (pi-ai getSupportedThinkingLevels), and a level mapped to
+// null is explicitly unsupported — the picker must not offer either.
+const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high']
+const THINKING_LEVELS_EXPLICIT = ['xhigh', 'max']
+
+/**
+ * The webui's model picker shows per-model "variants" (`extractVariants` reads
+ * `models[mid].variants`, keys = variant ids, `{disabled:true}` hides one) and
+ * sends the pick back as `model.variant`. For pi that IS the thinking level —
+ * without this the picker offers no thinking control for pi models AND a pick
+ * made on the opencode side is silently dropped here.
+ */
+function thinkingVariants(m) {
+  if (!m.reasoning) return undefined
+  const map = m.thinkingLevelMap ?? {}
+  const out = {}
+  for (const lvl of [...THINKING_LEVELS, ...THINKING_LEVELS_EXPLICIT]) {
+    if (map[lvl] === null) continue
+    if (THINKING_LEVELS_EXPLICIT.includes(lvl) && map[lvl] === undefined) continue
+    out[lvl] = {}
+  }
+  return Object.keys(out).length > 1 ? out : undefined
+}
+
 function storeProviders() {
   const file = path.join(PI_AGENT_DIR, 'models-store.json')
   let st
@@ -1510,6 +1659,7 @@ function storeProviders() {
         name: m.name ?? m.id,
         limit: { context: m.contextWindow ?? 0, output: m.maxTokens ?? 0 },
         ...(m.reasoning === undefined ? {} : { reasoning: !!m.reasoning }),
+        ...(thinkingVariants(m) ? { variants: thinkingVariants(m) } : {}),
       }
     }
     if (Object.keys(models).length) providers.push({ id: pid, name: pid, models, routerBase })
@@ -1681,6 +1831,13 @@ async function handleApi(req, res, url) {
       await s
         .send({ type: 'set_model', provider: body.model.providerID ?? '', modelId: body.model.id }, { timeoutMs: 10000 })
         .catch(() => {})
+      const ent = entryFor(s.id)
+      ent.level = null // the model switch re-picks a level; re-apply the pick below
+      const level = typeof body.model?.variant === 'string' ? body.model.variant : null
+      if (level) {
+        await s.send({ type: 'set_thinking_level', level }, { timeoutMs: 5000 }).catch(() => null)
+        ent.level = level
+      }
       emitSessionUpdated(s.id, s, undefined, true)
     }
     return sendJson(res, ocSession(s) ?? { ok: true })
@@ -1806,7 +1963,7 @@ async function handleApi(req, res, url) {
     if (rest === '' && req.method === 'GET') return sendJson(res, ocSession(s, raw))
 
     if (rest === '/message') {
-      const entries = s ? s.entries : null
+      const entries = s ? transcriptEntries(s, live.get(s.id)) : null
       let msgs = entries ? toOcMessages(entries) : []
       const limit = Number(q.get('limit') || 0)
       if (limit > 0 && msgs.length > limit) msgs = msgs.slice(-limit)
@@ -1849,6 +2006,7 @@ async function handleApi(req, res, url) {
         )
       if (!text && !images.length) return sendJson(res, apiErr('empty prompt'), 400)
       const streaming = !!s.isStreaming
+      const ent = entryFor(s.id) // per-bridge session state (thinking level lives here)
       // A steer never changes the model: the turn it lands inside is already
       // running on whatever model produced it.
       if (body.model?.id && !(streaming && delivery === 'steer')) {
@@ -1858,6 +2016,20 @@ async function handleApi(req, res, url) {
             { timeoutMs: 10000 },
           )
           .catch(() => {})
+        // set_model re-picks a thinking level from settings, so the level has to
+        // be applied AFTER it, and the variant has to survive the model switch.
+        ent.level = null
+      }
+      // webui variant -> pi thinking level. Only when it changed: this rides on
+      // every prompt, and an RPC round trip per prompt is pure latency.
+      const level = typeof body.model?.variant === 'string' ? body.model.variant : null
+      if (level && level !== ent.level) {
+        const r = await s.send({ type: 'set_thinking_level', level }, { timeoutMs: 5000 }).catch(() => null)
+        if (r?.success === false) {
+          console.log(`[thinking] ${s.id}: pi rejected level "${level}" (${r.error ?? 'unknown'}) — using the session's level`)
+        } else {
+          ent.level = level
+        }
       }
       const cmd = { type: 'prompt', message: text }
       if (images.length) cmd.images = images

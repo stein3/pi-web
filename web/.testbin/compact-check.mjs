@@ -242,7 +242,26 @@ async function caseOk() {
     check(!st.busy && !st.compacting, `webui state un-stuck (busy=${st.busy} compacting=${st.compacting})`)
 
     const after = await req(`/oc/session/${sid}/message`)
-    check((after.json || []).length === n0, `transcript NOT pruned by compaction (${n0} -> ${(after.json || []).length})`)
+    const rows = after.json || []
+    check(
+      rows.length === n0 + 1,
+      `history is NOT pruned and the summary lands as ONE new row (${n0} -> ${rows.length})`,
+    )
+    const sum = rows.at(-1)
+    check(sum?.id?.startsWith('cmp_'), `summary row has the deterministic compaction id (${sum?.id})`)
+    const sumText = (sum?.parts ?? []).map((p) => p.text ?? '').join('')
+    check(
+      sum?.role === 'assistant' && sumText.includes('Context compacted') && sumText.includes('compact-check fixture'),
+      `the row carries pi's summary text + header (${JSON.stringify(sumText.slice(0, 60))})`,
+    )
+    check(
+      (sum?.parts ?? []).length > 0 && (sum?.parts ?? []).every((p) => p.synthetic === true),
+      'the row is marked synthetic (no revert/fork affordance on generated text)',
+    )
+    check(
+      seen('session.compacted').length >= 1,
+      `session.compacted fires so the webui clears "Compacting" AND refetches (${seen('session.compacted').length})`,
+    )
 
     // unknown id still 404s, it is not swallowed by the new route
     const ghost = await summarize('00000000-0000-4000-8000-000000000000')

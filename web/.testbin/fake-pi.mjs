@@ -39,6 +39,21 @@ function streamWords() {
   return Array.from({ length: STREAM_WORDS }, (_, i) => (i === STREAM_WORDS - 1 ? 'end.' : `w${i} `))
 }
 
+// Real pi (any reasoning model — including the loaded llama.cpp GGUF) opens the
+// assistant message with a `thinking` block and streams it as
+// thinking_start/delta/end before the answer. The fake used to skip it, so not
+// ONE check exercised the bridge's reasoning mapping — a whole feature could
+// break silently. Shapes are pi's own (pi-ai message events:
+// thinking_end carries `content`, not `thinking`). FAKE_PI_THINKING=0 disables
+// it for checks that count deltas exactly.
+const THINKING = process.env.FAKE_PI_THINKING !== '0'
+const THINK_WORDS = ['Plan: ', 'read ', 'then edit.']
+const THINK_TEXT = THINK_WORDS.join('')
+let thinkingLevel = 'medium'
+// pi streams a thinking block only while the level is not "off" — so a check
+// can prove the webui's variant actually reached the child by its absence.
+const thinksNow = () => THINKING && thinkingLevel !== 'off'
+
 // Captured verbatim from a real pi 1.3.0 edit result (pi's own
 // generateUnifiedPatch / generateDiffString over "file contents" -> "v2").
 // The edit tool is the only pi tool whose result carries `details`, and
@@ -86,19 +101,29 @@ async function emitAssistant(text) {
   const t = ts()
   const words = streamWords()
   const full = words.join('')
+  // thinking block first -> every later contentIndex shifts by one
+  const off = thinksNow() ? 1 : 0
   out({ type: 'message_start', message: { role: 'assistant', content: [], provider: 'testprov', model: 'fake-1', timestamp: t } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: 0 } })
+  if (thinksNow()) {
+    out({ type: 'message_update', assistantMessageEvent: { type: 'thinking_start', contentIndex: 0 } })
+    for (const w of THINK_WORDS) {
+      out({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: w } })
+      if (DELTA_MS) await sleep(DELTA_MS)
+    }
+    out({ type: 'message_update', assistantMessageEvent: { type: 'thinking_end', contentIndex: 0, content: THINK_TEXT, contentSignature: 'reasoning_content' } })
+  }
+  out({ type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: off } })
   for (const w of words) {
-    out({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: w } })
+    out({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: off, delta: w } })
     if (DELTA_MS) await sleep(DELTA_MS)
   }
-  out({ type: 'message_update', assistantMessageEvent: { type: 'text_end', contentIndex: 0, content: full } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: 1, id: 'call_1', toolName: 'bash' } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 1, id: 'call_1', toolCall: { id: 'call_1', name: 'bash', arguments: '{"command":"echo hi"}' } } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: 2, id: 'call_2', toolName: 'read' } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 2, id: 'call_2', toolCall: { id: 'call_2', name: 'read', arguments: '{"path":"/tmp/x.txt"}' } } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: 3, id: 'call_3', toolName: 'edit' } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 3, id: 'call_3', toolCall: { id: 'call_3', name: 'edit', arguments: EDIT_JSON } } })
+  out({ type: 'message_update', assistantMessageEvent: { type: 'text_end', contentIndex: off, content: full } })
+  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: off + 1, id: 'call_1', toolName: 'bash' } })
+  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: off + 1, id: 'call_1', toolCall: { id: 'call_1', name: 'bash', arguments: '{"command":"echo hi"}' } } })
+  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: off + 2, id: 'call_2', toolName: 'read' } })
+  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: off + 2, id: 'call_2', toolCall: { id: 'call_2', name: 'read', arguments: '{"path":"/tmp/x.txt"}' } } })
+  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: off + 3, id: 'call_3', toolName: 'edit' } })
+  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: off + 3, id: 'call_3', toolCall: { id: 'call_3', name: 'edit', arguments: EDIT_JSON } } })
   // pi's REAL order (agent-loop.ts): the assistant message_end fires when
   // the LLM stream ends — BEFORE any tool runs. Tools execute next
   // (tool_execution_*), then each toolResult is emitted as its own
@@ -108,6 +133,7 @@ async function emitAssistant(text) {
     message: {
       role: 'assistant',
       content: [
+        ...(thinksNow() ? [{ type: 'thinking', thinking: THINK_TEXT, thinkingSignature: 'reasoning_content' }] : []),
         { type: 'text', text: full },
         { type: 'toolCall', id: 'call_1', name: 'bash', arguments: '{"command":"echo hi"}' },
         { type: 'toolCall', id: 'call_2', name: 'read', arguments: '{"path":"/tmp/x.txt"}' },
@@ -218,6 +244,15 @@ rl.on('line', async (line) => {
     void run(text, images)
   } else if (cmd.type === 'set_model') {
     resp(cmd, { provider: cmd.provider, id: cmd.modelId })
+  } else if (cmd.type === 'set_thinking_level') {
+    // pi: setThinkingLevel() clamps to the model's levels, appends a
+    // thinking_level_change entry and emits this event only when it changes
+    // (core/agent-session.js). The webui's model "variant" IS this level.
+    thinkingLevel = cmd.level
+    out({ type: 'thinking_level_changed', level: thinkingLevel })
+    resp(cmd)
+  } else if (cmd.type === 'get_thinking_level' || cmd.type === 'cycle_thinking_level') {
+    resp(cmd, { level: thinkingLevel })
   } else if (cmd.type === 'set_follow_up_mode') {
     followMode = cmd.mode
     resp(cmd)
@@ -267,7 +302,8 @@ rl.on('line', async (line) => {
       return
     }
     const result = {
-      summary: '## Goal\ncompact-check fixture\n\n## Next Steps\n1. nothing',
+      summary:
+        process.env.FAKE_PI_SUMMARY || '## Goal\ncompact-check fixture\n\n## Next Steps\n1. nothing',
       firstKeptEntryId: 'e_2',
       tokensBefore: 42000,
       estimatedTokensAfter: 900,
