@@ -77,6 +77,17 @@ const { completeDirectories } = await import(
   'pi-tau-web-server/bin/path-completion.js'
 )
 
+// Soft-delete trash root. pi stores one dir per workspace directly under
+// SESSIONS_DIR and listFiles() walks that tree — so a `sessions/trash/` dir
+// re-lists every "deleted" session forever (delete looked like a no-op).
+// Trash lives OUTSIDE the scanned tree; pi's own resume picker only reads
+// sessions/<encoded-cwd>/ flat, so it never sees it either.
+const TRASH_DIR = path.join(path.dirname(SESSIONS_DIR), 'sessions-trash')
+const TRASHED_DIRS = new Set(
+  // 'trash' = the in-tree trash older builds left behind; never re-list it
+  [TRASH_DIR, path.join(SESSIONS_DIR, 'trash')].map((p) => path.resolve(p)),
+)
+
 // ---------------------------------------------------------------------------
 // SSE hub
 // ---------------------------------------------------------------------------
@@ -132,17 +143,139 @@ const live = new Map()
 /** publicId/uuid -> tau session, for cold sessions opened from history */
 const byPublicId = new Map()
 
+// ---------------------------------------------------------------------------
+// live-child reclamation
+// ---------------------------------------------------------------------------
+// Children are server-owned and survive browser reloads by design — but nothing
+// ever released them. Closing a tab is purely local in the webui (`tabs.close()`;
+// no HTTP call), so every session ever opened kept a `pi` child for the whole
+// server lifetime. Measured after one working day (2026-10-25): 13 children /
+// 1.80 GiB RSS against a 3 GiB cgroup cap (~150 MB each), and ONE background
+// child produced 83% of all SSE frames in a 170 s window (4,794 deltas) while
+// the foreground session was mid-turn — with the llama.cpp router at
+// `max_instances: 1` that child was competing for the same slot the foreground
+// turn needed.
+//
+// Reap idle children: never one that is streaming, has an RPC in flight, or holds
+// a pending dialog. Reaped sessions are NOT deleted — the next request takes the
+// existing cold path (`sessionFor` -> `liveManager.resume` from the JSONL). Since
+// every public id is now pi's file uuid, a reaped session stays addressable by
+// construction; `reapedFile` is what keeps a tab that still holds an old tau id
+// resolvable after its child is closed.
+const IDLE_TTL_MS = Number(process.env.PI_WEB_IDLE_TTL_MS ?? 20 * 60_000)
+const MAX_LIVE = Number(process.env.PI_WEB_MAX_LIVE ?? 6)
+const REAP_INTERVAL_MS = Number(process.env.PI_WEB_REAP_INTERVAL_MS ?? 60_000)
+const reapedFile = new Map() // publicId -> JSONL path once its child is reaped
+const INTERNAL_CLOSE = new Map() // tauId -> file: pi-web-initiated close
+
+function childIdleMs(s) {
+  const t = Date.parse(s?.lastActiveAt ?? '') || 0
+  return t ? Math.max(0, Date.now() - t) : Number.MAX_SAFE_INTEGER
+}
+
+function reapable(s) {
+  if (s.isStreaming) return false // a turn is running (turn_start -> agent_settled)
+  if (s.pending?.size) return false // an RPC round-trip is in flight
+  if (s.pendingDialogs?.size) return false // a permission/question dialog is open
+  if (s.abortState && s.abortState !== 'idle') return false // an abort is settling
+  return true
+}
+
+async function reapIdleChildren() {
+  const all = [...liveManager.sessions.values()]
+  if (!all.length) return
+  // most idle first
+  const idle = all.filter(reapable).sort((a, b) => childIdleMs(b) - childIdleMs(a))
+  const doomed = new Set()
+  for (const s of idle) if (childIdleMs(s) >= IDLE_TTL_MS) doomed.add(s)
+  let over = all.length - MAX_LIVE // LRU cap: idle children only, streaming ones stay
+  for (const s of idle) {
+    if (over <= 0) break
+    if (!doomed.has(s)) doomed.add(s)
+    over -= 1
+  }
+  for (const s of doomed) {
+    const file = s.sessionFile
+    if (!file) continue // no transcript yet — closing it would lose the chat
+    const ids = [...publicIdsFor(s.id)]
+    for (const id of ids) reapedFile.set(id, file)
+    INTERNAL_CLOSE.set(s.id, file)
+    console.log(
+      `[reap] ${s.id} idle ${Math.round(childIdleMs(s) / 1000)}s -> closed child (${ids.join(',')} resumes from ${path.basename(file)}); ${liveManager.sessions.size} live`,
+    )
+    try {
+      await liveManager.delete(s.id, 'idle_reaper')
+    } catch (err) {
+      INTERNAL_CLOSE.delete(s.id)
+      console.error('[reap] close failed:', err?.message ?? err)
+    }
+  }
+}
+
 function entryFor(tauId) {
   let e = live.get(tauId)
   if (!e) {
-    e = { ids: new Set([tauId]), dup: new Map(), cur: null, title: null, byCall: new Map(), toolStart: new Map() }
+    e = {
+      ids: new Set([tauId]),
+      dup: new Map(),
+      cur: null,
+      title: null,
+      byCall: new Map(),
+      toolStart: new Map(),
+      file: null, // last sessionFile seen (drives the canonical-uuid alias)
+      armed: false,
+      queue: { steering: [], followUp: [] },
+    }
     live.set(tauId, e)
   }
   return e
 }
 
+
+/**
+ * pi's own session uuid, straight from the file name pi writes:
+ * `<iso-ts>_<uuid>.jsonl` (the ts has no underscores, so split on the last one).
+ *
+ * This is the ONE id that survives everything — child reaped, child exited,
+ * server restarted — because it is the name of the transcript on disk. tau's
+ * `tau_*` ids are per-child: the same session answers as a DIFFERENT tau id
+ * after every resume, which is how one session ends up open in two tabs (the
+ * tab holds the old id, the sidebar row was re-labelled with the new one).
+ * So the tau id is an internal handle only: every PUBLIC id pi-web publishes —
+ * `GET /oc/session`, `GET /oc/session/{id}`, the history rows, and the
+ * `sessionID` on every SSE frame — is the uuid whenever a transcript exists.
+ * A child with no file yet (created, never prompted) falls back to its tau id;
+ * losing those is fine.
+ */
+function fileUuid(file) {
+  if (!file) return null
+  const base = path.basename(String(file))
+  if (!base.endsWith('.jsonl')) return null
+  const i = base.lastIndexOf('_')
+  if (i < 0) return null
+  const uuid = base.slice(i + 1, -'.jsonl'.length)
+  // pi ids are UUID-ish; refuse anything that looks like a collision suffix
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(uuid) ? uuid : null
+}
+
+/** the id this session is known by outside the server */
+function canonicalId(s) {
+  if (!s) return null
+  return fileUuid(s.sessionFile) ?? s.id
+}
+
 function publicIdsFor(tauId) {
-  return live.get(tauId)?.ids ?? [tauId]
+  const e = live.get(tauId)
+  if (!e) return [tauId]
+  // register the canonical uuid as an alias the moment the child knows its file,
+  // so frames reach tabs opened by the uuid AND tabs that still hold a tau id
+  const f = liveManager.get(tauId)?.sessionFile
+  if (f && f !== e.file) {
+    e.file = f
+    const uuid = fileUuid(f)
+    if (uuid) e.ids.add(uuid)
+  }
+  return e.ids
 }
 
 function sessionByAnyId(id) {
@@ -648,7 +781,8 @@ function ocSession(s, publicId) {
   const e = live.get(s.id)
   const title = e?.title || s.sessionName || null
   return {
-    id: publicId ?? s.id,
+    // canonical (uuid) unless the caller asked for a specific alias
+    id: publicId ?? canonicalId(s),
     title: title || undefined,
     cwd: s.cwd || undefined,
     time: { created: Date.parse(s.createdAt) || Date.now(), updated: Date.parse(s.lastActiveAt) || Date.now() },
@@ -706,6 +840,7 @@ function listFiles() {
   for (const d of dirs) {
     if (!d.isDirectory()) continue
     const p = path.join(SESSIONS_DIR, d.name)
+    if (TRASHED_DIRS.has(path.resolve(p))) continue // soft-deleted, never listed
     let files
     try {
       files = fs.readdirSync(p)
@@ -715,6 +850,30 @@ function listFiles() {
     for (const f of files) if (f.endsWith('.jsonl')) out.push(path.join(p, f))
   }
   return out
+}
+
+/**
+ * Move a session JSONL into the out-of-tree trash. null on success, an error
+ * string otherwise. Rename (not unlink) keeps deletes recoverable; pi appends
+ * per write, so the owning child must already be closed — see the DELETE route.
+ */
+function trashSessionFile(file) {
+  try {
+    fs.mkdirSync(TRASH_DIR, { recursive: true })
+    const ext = path.extname(file)
+    const base = path.basename(file, ext)
+    let dest = path.join(TRASH_DIR, path.basename(file))
+    for (let n = 1; fs.existsSync(dest); n++) dest = path.join(TRASH_DIR, `${base}_${n}${ext}`)
+    fs.renameSync(file, dest)
+    // drop the workspace dir once empty (pi recreates it on the next session)
+    const dir = path.dirname(file)
+    if (path.resolve(dir) !== path.resolve(SESSIONS_DIR) && fs.readdirSync(dir).length === 0) {
+      fs.rmdirSync(dir)
+    }
+    return null
+  } catch (err) {
+    return String(err?.message ?? err)
+  }
 }
 
 /** file path -> tau id when a live child owns it (so sidebar rows share tabs) */
@@ -733,15 +892,25 @@ function listFilesCached() {
   return filesCache.list
 }
 
-function sessionMeta(file) {
-  const st = fs.statSync(file)
+/**
+ * Sidebar/history metadata for one session file.
+ *
+ * Cached per (mtime, size): the webui polls /api/history/sessions every 60 s and
+ * `fileForId` uses it too, and each uncached pass re-parsed EVERY session JSONL
+ * (61 ms for 27 files / 12 MB on this box, on the single-threaded bridge that is
+ * also streaming everyone's SSE — and it grows linearly with history).
+ * `readSessionMeta` is the file-derived part; liveness/alias identity is applied
+ * per call because it depends on the live children, not the file.
+ */
+const metaCache = new Map() // file -> { key, meta }
+
+function readSessionMeta(file, st) {
   const entries = readJsonl(file)
   const header = entries.find((e) => e.type === 'session')
   if (!header?.id) return null
   const msgs = messagesOf(entries)
   const users = msgs.filter((m) => m.message.role === 'user').length
   if (users === 0 && entries.length <= 8) return null
-  const tauId = liveTauIdFor(file)
   const info = entries.find((e) => e.type === 'session_info' && e.name)
   const modelChange = [...entries].reverse().find((e) => e.type === 'model_change')
   let tokens
@@ -758,7 +927,6 @@ function sessionMeta(file) {
     }
   }
   return {
-    id: tauId ?? header.id,
     file,
     cwd: header.cwd || undefined,
     title: info?.name || deriveTitle(entries) || header.id.slice(0, 12),
@@ -769,13 +937,35 @@ function sessionMeta(file) {
     model: modelChange?.modelId ?? '',
     model_provider: modelChange?.provider ?? '',
     ...(tokens ? { tokens } : {}),
-    live: !!tauId,
+    uuid: header.id,
   }
 }
 
+function sessionMeta(file) {
+  let st
+  try {
+    st = fs.statSync(file)
+  } catch {
+    return null
+  }
+  const key = `${st.mtimeMs}|${st.size}`
+  let hit = metaCache.get(file)
+  if (!hit || hit.key !== key) {
+    hit = { key, meta: readSessionMeta(file, st) }
+    metaCache.set(file, hit)
+  }
+  const base = hit.meta
+  if (!base) return null
+  // Always pi's file uuid — the same string `ocSession()` publishes for the live
+  // child, so the sidebar row and the tab can never diverge into two ids (and
+  // therefore two tabs) for one session.
+  return { ...base, id: base.uuid, live: !!liveTauIdFor(file) }
+}
+
 function allSessionMeta() {
+  const files = listFilesCached()
   const rows = []
-  for (const f of listFilesCached()) {
+  for (const f of files) {
     try {
       const m = sessionMeta(f)
       if (m) rows.push(m)
@@ -784,6 +974,12 @@ function allSessionMeta() {
     }
   }
   rows.sort((a, b) => b.updated - a.updated)
+  // drop cache entries for files that vanished (deleted/trashed) so the map
+  // can't grow across a long-lived server
+  if (metaCache.size > files.length) {
+    const keep = new Set(files)
+    for (const f of metaCache.keys()) if (!keep.has(f)) metaCache.delete(f)
+  }
   return rows
 }
 
@@ -853,6 +1049,7 @@ function toHistMsgs(entries) {
 function fileForId(id) {
   const s = sessionByAnyId(id)
   if (s?.sessionFile) return s.sessionFile
+  if (reapedFile.has(id)) return reapedFile.get(id) // child reaped; file still there
   const byId = allSessionMeta().find((m) => m.id === id)
   if (byId) return byId.file
   const byTau = allSessionMeta().find((m) => m.file && path.basename(m.file).includes(id))
@@ -872,10 +1069,19 @@ function entriesForId(id) {
  * on the same tab). null when the id names nothing.
  */
 async function sessionFor(id) {
-  const live = sessionByAnyId(id)
-  if (live) return live
+  const existing = sessionByAnyId(id)
+  if (existing) return existing
   const file = fileForId(id)
   if (!file) return null
+  // A live child may already own this transcript under another alias (its tau
+  // id, or the uuid). Never run two children against one JSONL — attach to the
+  // one that exists and remember the alias instead.
+  const owned = liveManager.findBySessionFile(file)
+  if (owned) {
+    entryFor(owned.id).ids.add(id)
+    byPublicId.set(id, owned.id)
+    return owned
+  }
   const entries = readJsonl(file)
   const s = await liveManager.resume({
     sessionFile: file,
@@ -1333,41 +1539,37 @@ async function handleApi(req, res, url) {
     if (rest === '') {
       if (req.method === 'DELETE') {
         const s = sessionByAnyId(raw)
+        // Resolve the JSONL BEFORE closing the child. Live sidebar rows carry a
+        // tau id, which appears nowhere in the file name, so s.sessionFile is
+        // the only link between them — and that link dies with the child.
+        const file = fileForId(raw)
+        const ids = s ? [...publicIdsFor(s.id), raw] : [raw]
+        // Close first (best effort): pi appends to its JSONL per write, so a
+        // child still running could re-create the path we are about to move.
         if (s) {
-          await liveManager.delete(s.id, 'closed_by_user')
-        } else {
-          const meta = allSessionMeta()
-          const m = meta.find((sm) => sm.id === raw)
-          if (m && m.file) {
-            try {
-                const file = m.file
-                const dir = path.dirname(file)
-                const TRASH_DIR = path.join(SESSIONS_DIR, 'trash')
-                if (!fs.existsSync(TRASH_DIR)) {
-                  fs.mkdirSync(TRASH_DIR, { recursive: true })
-                }
-                const dest = path.join(TRASH_DIR, path.basename(file))
-                let finalDest = dest
-                let counter = 1
-                while (fs.existsSync(finalDest)) {
-                  const ext = path.extname(file)
-                  const base = path.basename(file, ext)
-                  finalDest = path.join(TRASH_DIR, `${base}_${counter}${ext}`)
-                  counter++
-                }
-                fs.renameSync(file, finalDest)
-                if (fs.readdirSync(dir).length === 0) {
-                  fs.rmdirSync(dir)
-                }
-              } catch (err) {
-                return sendJson(res, { error: `failed to trash: ${err.message}` }, 500)
-              }
-          } else {
-            return sendJson(res, { error: 'unknown session' }, 404)
+          try {
+            await liveManager.delete(s.id, 'closed_by_user')
+          } catch (err) {
+            console.error('[delete] close failed:', err?.message ?? err)
           }
         }
-        filesCache.list = null
-        return sendJson(res, { ok: true })
+        filesCache = { at: 0, list: null }
+        // a trashed session must not stay resumable through the reap map
+        if (file) metaCache.delete(file)
+        for (const id of ids) reapedFile.delete(id)
+        if (!s && !file) return sendJson(res, { error: 'unknown session' }, 404)
+        if (file) {
+          const err = trashSessionFile(file)
+          if (err) return sendJson(res, { error: `failed to trash: ${err}` }, 500)
+        }
+        // star/tag sidecar + error tiles must not outlive the session
+        const all = loadMeta()
+        for (const id of ids) {
+          delete all[id]
+          errTiles.delete(id)
+        }
+        saveMeta(all)
+        return sendJson(res, { ok: true, trashed: !!file })
       }
       if (req.method === 'PATCH') {
         const body = await readBody(req)
@@ -1590,6 +1792,12 @@ const server = http.createServer(async (req, res) => {
 const hb = setInterval(() => emit('heartbeat', {}), 10000)
 hb.unref?.()
 
+// idle/overflow pi children — see the reclamation block near `live`
+const reaper = setInterval(() => {
+  reapIdleChildren().catch((err) => console.error('[reap]', err?.message ?? err))
+}, REAP_INTERVAL_MS)
+reaper.unref?.()
+
 server.listen(PORT, HOST, () => {
   console.log(`pi-web  http://${HOST}:${PORT}`)
   console.log(`  dist    ${WEBUI_DIST}`)
@@ -1609,6 +1817,7 @@ server.listen(PORT, HOST, () => {
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     clearInterval(hb)
+    clearInterval(reaper)
     server.close()
     try {
       await liveManager.shutdown()
