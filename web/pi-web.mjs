@@ -320,6 +320,22 @@ function sessionByAnyId(id) {
   if (s) return s
   const tauId = byPublicId.get(id)
   if (tauId) return liveManager.get(tauId) ?? null
+  // Now that the PUBLIC id is pi's file uuid while a child is addressed by its
+  // tau id, an id can be missing from both maps and still name a live child —
+  // the alias set (`e.ids`) is the authority, and the transcript path is the
+  // backstop. Without these, the first click on a uuid sidebar row would fall
+  // through to `sessionFor` and resume a SECOND child on the same JSONL.
+  for (const [tid, e] of live) {
+    if (e.ids.has(id)) {
+      const owned = liveManager.get(tid)
+      if (owned) return owned
+    }
+  }
+  const f = reapedFile.get(id)
+  if (f) {
+    const owned = liveManager.findBySessionFile(f)
+    if (owned) return owned
+  }
   return null
 }
 
@@ -560,18 +576,74 @@ function emitFor(tauId, type, properties) {
   for (const id of publicIdsFor(tauId)) emit(type, { ...properties, sessionID: id })
 }
 
+/**
+ * `session.updated` is the ONE opencode event pi-web must not mirror verbatim.
+ *
+ * tau calls `broadcastUpdated()` after **every** pi event and every RPC
+ * response (sessions.js: `touch(true)` in handleResponse, and the tail of
+ * handleEvent). Mirroring that put a `session.updated` beside every single
+ * token delta — measured on the live bridge over 170 s: 6,090 session.updated
+ * vs 5,375 message.part.delta, i.e. 1.13 per delta, 53% of ALL SSE frames.
+ * The webui coalesces text deltas (~40 ms, sse.ts bufferDelta) but its
+ * `session.updated` branch goes straight into `tabs.patch()` +
+ * `patchMetrics()` — one uncoalesced full store notify per token, so the
+ * transcript re-renders per token. opencode's engine only sends this event on
+ * real metadata changes; that asymmetry is why the webui feels laggier on pi.
+ *
+ * So: republish only when the projection actually changes. `time.updated`
+ * (tau's lastActiveAt, bumped per event) is the only field that really moves
+ * mid-turn and is deliberately OUT of the signature — the webui uses it for
+ * sidebar ordering only, and the forced emit at turn end refreshes it.
+ */
+const infoSig = new Map() // tauId -> signature of the last session.updated sent
+
+function sessionSig(s) {
+  if (!s) return ''
+  const i = ocSession(s)
+  if (!i) return ''
+  return [
+    i.title ?? '',
+    i.cwd ?? '',
+    i.cost ?? 0,
+    i.model?.providerID ?? '',
+    i.model?.id ?? '',
+    i.revert ? 1 : 0,
+  ].join('\u0000')
+}
+
+function emitSessionUpdated(tauId, s, publicId, force = false) {
+  const sig = sessionSig(s)
+  const changed = infoSig.get(tauId) !== sig
+  if (changed) infoSig.set(tauId, sig)
+  if (!changed && !force) return false
+  const info = ocSession(s, publicId)
+  if (!info) return false
+  emitFor(tauId, 'session.updated', { info })
+  return true
+}
+
 function onTauFrame(frame) {
+  // `created` is a tab attaching to a child (new or resumed) — always announce.
+  // `updated` fires from tau after EVERY event/RPC response — gate it.
   if (frame.type === 'live_session_created' || frame.type === 'live_session_updated') {
     const s = liveManager.get(frame.session?.id)
-    if (s) emitFor(s.id, 'session.updated', { info: ocSession(s) })
+    if (s) emitSessionUpdated(s.id, s, undefined, frame.type === 'live_session_created')
     return
   }
   if (frame.type === 'live_session_closed') {
     const ids = publicIdsFor(frame.sessionId)
     live.delete(frame.sessionId)
+    infoSig.delete(frame.sessionId)
+    // A reaper close is invisible to the client on purpose: `session.deleted`
+    // makes the webui CLOSE the tab (sse.ts closes it and bumps the sidebar
+    // dirty counter). The child is gone but the session is not — the next
+    // request resumes it from its JSONL under the same public id.
+    const reapedFrom = INTERNAL_CLOSE.get(frame.sessionId)
+    INTERNAL_CLOSE.delete(frame.sessionId)
     for (const id of ids) {
       byPublicId.delete(id)
-      emit('session.deleted', { sessionID: id })
+      if (reapedFrom) reapedFile.set(id, reapedFrom)
+      else emit('session.deleted', { sessionID: id })
     }
     return
   }
@@ -596,6 +668,8 @@ function onPiEvent(tauId, ev) {
 
   if (t === 'session_name' && ev.name) {
     e.title = ev.name
+    // auto-title / rename: the webui follows it (markSessionListDirty)
+    emitSessionUpdated(tauId, session, undefined, true)
     return
   }
 
@@ -778,6 +852,11 @@ function onPiEvent(tauId, ev) {
   }
 
   if (t === 'agent_settled') {
+    // one forced metadata frame per turn: it carries the fresh `updated` the
+    // sidebar orders by, and the webui's session.updated branch schedules the
+    // post-turn transcript refetch (it is busy-gated, so mid-turn frames can
+    // never trigger one)
+    emitSessionUpdated(tauId, session, undefined, true)
     emitFor(tauId, 'session.idle', { sessionID: tauId })
     e.cur = null
     return
@@ -1593,7 +1672,7 @@ async function handleApi(req, res, url) {
       await s
         .send({ type: 'set_model', provider: body.model.providerID ?? '', modelId: body.model.id }, { timeoutMs: 10000 })
         .catch(() => {})
-      emitFor(s.id, 'session.updated', { info: ocSession(s) })
+      emitSessionUpdated(s.id, s, undefined, true)
     }
     return sendJson(res, ocSession(s) ?? { ok: true })
   }
@@ -1690,7 +1769,7 @@ async function handleApi(req, res, url) {
               /* read-only tree — keep in-memory title only */
             }
           }
-          emitFor(s.id, 'session.updated', { info: ocSession(s, raw) })
+          emitSessionUpdated(s.id, s, raw, true)
         }
         return sendJson(res, { ok: true })
       }
