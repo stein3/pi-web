@@ -231,6 +231,43 @@ function entryFor(tauId) {
   return e
 }
 
+// pi owns the pending-message queues (steer + follow-up live inside the RPC
+// child); we only mirror what its `queue_update` event reports — complete lists,
+// never diffs — so a client that missed an event heals on the next one. Nothing
+// here can drain them, and nothing here outlives the child.
+function queueView(tauId) {
+  const q = live.get(tauId)?.queue
+  return { steering: [...(q?.steering ?? [])], followUp: [...(q?.followUp ?? [])] }
+}
+
+// pi's default hands the follow-up queue over ONE message per stop-boundary, so
+// three queued follow-ups land across three turns. A web client expects all of
+// them at the next settle, so ask for "all" once per child. NB: this is a
+// global pi setting that pi persists into settings.json — it also changes the
+// interactive TUI's queue behaviour.
+function armSession(s) {
+  const e = entryFor(s.id)
+  if (e.armed) return
+  e.armed = true
+  s.send({ type: 'set_follow_up_mode', mode: 'all' }, { timeoutMs: 8000 }).catch(() => {
+    e.armed = false // let the next request retry
+  })
+}
+
+function apiErr(message, name = 'APIError') {
+  return { name, data: { message: String(message) } }
+}
+
+// prompt_async file parts arrive in the opencode engine's shape:
+// {type:'file', mime, url:'data:<mime>;base64,…'}. pi wants ImageContent blocks:
+// {type:'image', data:<base64>, mimeType}. Returns null for anything else.
+function fileToImage(p) {
+  if (!p || p.type !== 'file') return null
+  const m = /^data:([^;,]+);base64,([\s\S]*)$/.exec(p.url ?? '')
+  if (!m) return null
+  if (!m[1].startsWith('image/')) return null
+  return { type: 'image', data: m[2], mimeType: m[1] }
+}
 
 /**
  * pi's own session uuid, straight from the file name pi writes:
@@ -547,9 +584,18 @@ function onPiEvent(tauId, ev) {
   const session = liveManager.get(tauId)
   const t = ev.type
 
+  // pi enqueued or drained: mirror the complete lists and republish them.
+  if (t === 'queue_update') {
+    e.queue = {
+      steering: (Array.isArray(ev.steering) ? ev.steering : []).map(String),
+      followUp: (Array.isArray(ev.followUp) ? ev.followUp : []).map(String),
+    }
+    emitFor(tauId, 'session.queue', { queue: e.queue })
+    return
+  }
+
   if (t === 'session_name' && ev.name) {
     e.title = ev.name
-    emitFor(tauId, 'session.updated', { info: ocSession(session) })
     return
   }
 
@@ -1091,8 +1137,10 @@ async function sessionFor(id) {
   })
   const e = entryFor(s.id)
   e.ids.add(id)
+  e.file = s.sessionFile ?? file
   byPublicId.set(id, s.id)
   seedDup(entries, e)
+  armSession(s)
   return s
 }
 
@@ -1526,6 +1574,7 @@ async function handleApi(req, res, url) {
     if (!st?.isDirectory()) return sendJson(res, { error: `not a directory: ${cwd}` }, 400)
     const s = await liveManager.create({ cwd, model: modelSpec(body?.model) })
     entryFor(s.id)
+    armSession(s)
     filesCache.list = null
     return sendJson(res, ocSession(s), 201)
   }
@@ -1613,14 +1662,46 @@ async function handleApi(req, res, url) {
       if (limit > 0 && msgs.length > limit) msgs = msgs.slice(-limit)
       return sendJson(res, msgs)
     }
+    // pi's pending queues. Doubles as the capability probe: a backend that
+    // answers these two arrays supports the strip, one that 404s keeps the
+    // old "queued shows up as a transcript row" behaviour.
+    if (rest === '/queue' && req.method === 'GET') return sendJson(res, queueView(s.id))
+    if (rest === '/queue/clear' && req.method === 'POST') {
+      // pi has no targeted dequeue — clearing is all-or-nothing by design.
+      try {
+        const r = await s.send({ type: 'clear_queue' }, { timeoutMs: 10000 })
+        if (r?.success === false) return sendJson(res, apiErr(r.error ?? 'clear_queue rejected'), 502)
+        // queue_update lands on its own; answer with what was dropped.
+        return sendJson(res, { ok: true, ...(r?.data ?? {}) })
+      } catch (err) {
+        return sendJson(res, apiErr(String(err?.message ?? err)), 504)
+      }
+    }
     if (rest === '/prompt_async' && req.method === 'POST') {
       const body = await readBody(req)
-      const text = (body.parts ?? [])
-        .filter((p) => p.type === 'text')
-        .map((p) => p.text)
+      const parts = Array.isArray(body.parts) ? body.parts : []
+      const text = parts
+        .filter((p) => p?.type === 'text')
+        .map((p) => p.text ?? '')
         .join('\n')
-      const cmd = { type: 'prompt', message: text }
-      if (body.model?.id) {
+        .trim()
+      const images = parts.map(fileToImage).filter(Boolean)
+      const refused = parts.filter((p) => p?.type === 'file' && !fileToImage(p))
+      // "steer" lands at the next turn boundary, "follow" after the run settles.
+      // The client states intent; pi picks the delivery, and only pi knows
+      // whether a run is live — a cached busy flag never does.
+      const delivery = body.delivery === 'steer' ? 'steer' : 'follow'
+      if (refused.length)
+        return sendJson(
+          res,
+          apiErr(`pi-web carries image attachments only; refused: ${refused.map((p) => p.filename ?? 'file').join(', ')}`),
+          415,
+        )
+      if (!text && !images.length) return sendJson(res, apiErr('empty prompt'), 400)
+      const streaming = !!s.isStreaming
+      // A steer never changes the model: the turn it lands inside is already
+      // running on whatever model produced it.
+      if (body.model?.id && !(streaming && delivery === 'steer')) {
         await s
           .send(
             { type: 'set_model', provider: body.model.providerID ?? '', modelId: body.model.id },
@@ -1628,11 +1709,22 @@ async function handleApi(req, res, url) {
           )
           .catch(() => {})
       }
-      if (s.isStreaming) cmd.streamingBehavior = 'followUp'
+      const cmd = { type: 'prompt', message: text }
+      if (images.length) cmd.images = images
+      if (streaming) cmd.streamingBehavior = delivery === 'steer' ? 'steer' : 'followUp'
+      // An idle prompt acks in milliseconds. A "/name" prompt runs the
+      // extension handler synchronously before its preflight ack, so that
+      // duration is unbounded by construction and gets a generous ceiling.
+      // A timeout is an UNKNOWN outcome (504), never a failure: pi defers
+      // prompts issued inside the settle window and acks them later, so
+      // treating it as a failure invites a duplicate execution.
       try {
-        await s.send(cmd, { timeoutMs: 15000 })
+        const resp = await s.send(cmd, { timeoutMs: text.startsWith('/') ? 300000 : streaming ? 15000 : 30000 })
+        if (resp?.success === false) return sendJson(res, apiErr(resp.error ?? 'prompt rejected'), 502)
       } catch (err) {
-        return sendJson(res, { name: 'Error', data: { message: String(err?.message ?? err) } }, 500)
+        const message = String(err?.message ?? err)
+        if (/timed out/i.test(message)) return sendJson(res, { name: 'Timeout', data: { message, unknown: true } }, 504)
+        return sendJson(res, { name: 'Error', data: { message } }, 500)
       }
       res.writeHead(204)
       res.end()
