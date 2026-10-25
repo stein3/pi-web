@@ -29,7 +29,10 @@
  * refetch and a live event can never disagree (the class of bug opencode's
  * part-id minting + dropBufferedDeltas defends against).
  *
- * Diff pane is intentionally not wired: tau has the better file/diff viewer.
+ * The Diff PANE is intentionally not wired (no /api/history/.../changes, no
+ * vcs/diff): tau has the better file/diff viewer. The transcript's inline
+ * edit-diff block IS wired — pi's tool `details.patch` is mapped to opencode's
+ * `state.metadata.filediff.patch` by `toolMetadata()`.
  *
  * Usage:  node pi-web.mjs [--port 8124] [--cwd /workspace] [--dir ~/.pi/agent]
  *                         [--dist /workspace/opencode/webui/dist]
@@ -178,12 +181,55 @@ function messagesOf(entries) {
 
 function textOf(content) {
   if (typeof content === 'string') return content
+  // `tool_execution_end` hands over the whole ToolResult object
+  // ({ content, details }), not its content blocks — unwrap it or the row
+  // renders with no output until the toolResult message_end lands.
+  if (content && typeof content === 'object' && !Array.isArray(content) && 'content' in content)
+    return textOf(content.content)
   if (Array.isArray(content))
     return content
       .filter((b) => b?.type === 'text')
       .map((b) => b.text ?? '')
       .join('')
   return ''
+}
+
+/**
+ * pi's tool `details` -> opencode's tool-part metadata.
+ *
+ * The transcript renders an edit row's diff from `state.metadata.filediff.patch`
+ * (opencode's shape; `state.metadata.diff` is its fallback). pi's edit tool
+ * produces exactly that artefact — `result.details.patch`, a unified diff from
+ * `Diff.createTwoFilesPatch`, persisted in the JSONL toolResult message — but
+ * the bridge hard-coded `metadata: {}` at every emission site, so the webui had
+ * nothing to draw: an edit row showed its path and no diff block. (pi's `write`
+ * still worked by accident: the webui synthesises an all-adds pseudo-patch from
+ * `state.input.content`, and pi's write input has a `content` arg; pi's edit
+ * input is `edits[]`, which that fallback cannot see.)
+ *
+ * Only the patch is copied, never the whole `details` blob: bash truncation
+ * details carry the full displaced content (tens of KB) and would be repeated
+ * in every SSE frame. Tools whose details has no string patch keep `{}`.
+ */
+function toolMetadata(input, details) {
+  const patch = typeof details?.patch === 'string' ? details.patch.trim() : ''
+  if (!patch) return {}
+  const lines = patch.split('\n')
+  const header = /^\+\+\+ (.+)$/m.exec(patch)
+  return {
+    filediff: {
+      file: input?.path ?? input?.filePath ?? input?.file_path ?? header?.[1] ?? '',
+      patch,
+      additions: lines.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length,
+      deletions: lines.filter((l) => l.startsWith('-') && !l.startsWith('---')).length,
+    },
+    // kept in sync: a client that only reads `metadata.diff` still gets a real
+    // unified diff, never pi's pretty `details.diff` (line-numbered, not patch)
+    diff: patch,
+    ...(Number.isFinite(details.firstChangedLine)
+      ? { firstChangedLine: details.firstChangedLine }
+      : {}),
+  }
 }
 
 function safeJson(s) {
@@ -271,7 +317,9 @@ function toOcMessage(m, mid, results) {
           title: toolTitle(b.name, args),
           input: args,
           output: res ? textOf(res.content) : '',
-          metadata: {},
+          // cold path: pi persisted `details` on the toolResult message, so a
+          // refetch/reload must rebuild the same diff the live stream showed
+          metadata: toolMetadata(args, res?.details),
           time,
         },
       })
@@ -486,8 +534,9 @@ function onPiEvent(tauId, ev) {
             t === 'tool_execution_end' ? (ev.isError ? 'error' : 'completed') : 'running',
           title: toolTitle(ev.toolName, input),
           input: input && typeof input === 'object' ? input : {},
-          output: t === 'tool_execution_end' ? textOf(res) : (partial ?? '') ,
-          metadata: {},
+          output: t === 'tool_execution_end' ? textOf(res) : (partial ?? ''),
+          // live path: `ev.result` is the ToolResult object, details included
+          metadata: toolMetadata(input, res?.details),
           time: { start, ...(t === 'tool_execution_end' ? { end: now } : {}) },
         },
       },
@@ -516,7 +565,9 @@ function onPiEvent(tauId, ev) {
           title: toolTitle(res.toolName ?? hit.tool, hit.input),
           input: hit.input && typeof hit.input === 'object' ? hit.input : {},
           output: textOf(res.content),
-          metadata: {},
+          // webui upserts parts with a shallow spread, so a later update whose
+          // metadata were `{}` would wipe the diff set at tool_execution_end
+          metadata: toolMetadata(hit.input, res.details),
           // created=0: the result's own END ts − durationMs is the window
           // (no assistant-created clamp needed — dur can't predate the epoch)
           time: toolWindow(res, 0),
