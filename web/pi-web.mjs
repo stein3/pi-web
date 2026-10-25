@@ -792,6 +792,31 @@ function onPiEvent(tauId, ev) {
   }
   if (t === 'compaction_end' || t === 'summarization_retry_finished') {
     emitFor(tauId, 'session.next.compaction.ended', { sessionID: tauId })
+    // A manual compaction ends the summary, NOT a run: pi's compact() aborts
+    // whatever was live FIRST, so agent_settled (our only session.idle source)
+    // already landed before compaction_start. Without an idle here the webui's
+    // busy flag — set by /compact itself and by compaction.started — sticks
+    // forever (the stop button stays up, the composer stays in steer mode).
+    // tau's isStreaming (true from turn_start, false only at agent_settled) is
+    // what separates "this summary belongs to a live turn" (auto threshold /
+    // overflow compaction — the turn continues) from "the session is at rest".
+    if (session?.isStreaming) return
+    const failed = ev.aborted || ev.errorMessage
+    if (failed && !compactingWait.has(tauId)) {
+      // Nobody is holding an HTTP response to report this on: the /compact POST
+      // already answered "started" (proxy ceiling), or the compaction came from
+      // the TUI / an auto-retry. The client must still learn, or its
+      // "Compacting…" strip never clears. A cancelled compaction is a user
+      // abort, not an error: opencode's own abort marker is what the webui
+      // filters out of its error tiles.
+      emitFor(tauId, 'session.error', {
+        sessionID: tauId,
+        error: ev.aborted
+          ? { name: 'MessageAbortedError', data: { message: 'Compaction cancelled' } }
+          : apiErr(ev.errorMessage ?? 'Compaction failed'),
+      })
+    }
+    emitFor(tauId, 'session.idle', { sessionID: tauId })
     return
   }
 }
@@ -1299,10 +1324,36 @@ async function engineCommands() {
 const NOT_WIRED = new Set([
   '/oc/session/fork',
   '/oc/session/revert',
-  '/oc/session/summarize',
 ])
+// POST sub-routes that must resume a cold/reaped session instead of 404ing
+// (they run inside a pi child). `/abort` deliberately does NOT: waking a child
+// only to abort it would resurrect a tab nobody asked for.
+const RESUME_ON_POST = new Set(['/prompt_async', '/command', '/queue/clear', '/summarize'])
 // opencode surfaces that degrade cleanly to "nothing here"
 const EMPTY_VCS = { '/oc/vcs/diff': [], '/oc/vcs/diff/raw': '' }
+
+// ---------------------------------------------------------------------------
+// Compaction (webui /compact -> opencode summarize -> pi RPC `compact`)
+//
+// The webui treats summarize as a BLOCKING POST (it flips busy + shows a
+// "Compacting…" strip and only trusts session.idle), and pi answers the RPC
+// only once the summary is written — one long prefill over the whole session.
+// On a local llama.cpp slot that runs far past a reverse proxy's ~100 s edge
+// timeout, where the failure would be a Cloudflare 524 that the webui reports
+// as "/compact failed" even when pi compacted the session fine. So the HTTP
+// request is answered on a ceiling: settle first -> real result; otherwise
+// answer "started" and let SSE carry the outcome (see compactingWait + the
+// compaction_end bridge).
+//
+// tauId -> number of summarize POSTs still waiting on the RPC. While one is
+// open the HTTP response is the error channel and the bridge stays silent; a
+// compaction_end always lands BEFORE the compact response line on pi's stdout,
+// so this map is still populated when the bridge decides who reports.
+// ---------------------------------------------------------------------------
+const SUMMARIZE_WAIT_MS = Number(process.env.PI_WEB_SUMMARIZE_WAIT_MS || 40_000)
+// tau's own send() default is 60 s, far too short for a summarisation call.
+const COMPACT_RPC_MS = Number(process.env.PI_WEB_COMPACT_RPC_MS || 600_000)
+const compactingWait = new Map()
 
 // ---------------------------------------------------------------------------
 // Model catalog (feeds GET /oc/config/providers → ComposerModelPicker,
@@ -1651,7 +1702,18 @@ async function handleApi(req, res, url) {
     // openLive fires /message and the info fetch in the same Promise.all, so
     // waiting for the info fetch to do the resume made the boot path 404 its
     // own message/todo reads (sidebar rows only ever GET, never write).
-    const s = req.method === 'GET' ? await sessionFor(raw) : sessionByAnyId(raw)
+    // /summarize resumes too: compaction has to run inside a pi child, so a
+    // session the reaper closed (or a sidebar row never opened) still has to
+    // answer /compact instead of 404ing.
+    //
+    // Same reasoning for the other POSTs that need a child: a tab whose child
+    // the reaper closed must be able to send a prompt without the browser first
+    // GETing the session. Resume is the existing cold path, and `raw` stays the
+    // address events come back on.
+    const s =
+      req.method === 'GET' || RESUME_ON_POST.has(rest)
+        ? await sessionFor(raw)
+        : sessionByAnyId(raw)
     if (!s) return sendJson(res, { error: 'unknown session' }, 404)
     if (rest === '' && req.method === 'GET') return sendJson(res, ocSession(s, raw))
 
@@ -1752,13 +1814,89 @@ async function handleApi(req, res, url) {
       const cmd = { type: 'prompt', message: `/${body.command}${args ? ` ${args}` : ''}` }
       if (s.isStreaming) cmd.streamingBehavior = 'followUp'
       try {
-        await s.send(cmd, { timeoutMs: 15000 })
+        // Extension commands execute before the ack and may drive an LLM, so no
+        // number here is safe: surface a timeout as unknown (504) rather than
+        // as a failure the webui would bounce back into the composer.
+        await s.send(cmd, { timeoutMs: 300000 })
       } catch (err) {
-        return sendJson(res, { name: 'Error', data: { message: String(err?.message ?? err) } }, 500)
+        const message = String(err?.message ?? err)
+        if (/timed out/i.test(message)) return sendJson(res, { name: 'Timeout', data: { message, unknown: true } }, 504)
+        return sendJson(res, { name: 'Error', data: { message } }, 500)
       }
       return sendJson(res, { ok: true })
     }
-    if (rest === '/fork' || rest === '/revert' || rest === '/summarize') {
+    if (rest === '/summarize' && req.method === 'POST') {
+      // opencode's summarize == pi's RPC `compact`: one summarisation call on
+      // the SESSION's own model, then a CompactionEntry is appended (pi keeps
+      // the raw transcript, so the webui transcript does NOT shrink — only the
+      // model context does, from firstKeptEntryId on).
+      //
+      // The body's {providerID,modelID} is deliberately ignored: pi has no
+      // model override on `compact`, and quietly set_model-ing to the picker's
+      // model would change the model of the user's NEXT turn, which /compact
+      // never asked for. The webui sends the SESSION's model anyway, and
+      // prompts already keep pi's session model in sync. `customInstructions`
+      // (pi's `/compact <instructions>` arg) is honoured for API clients.
+      const body = await readBody(req)
+      const instructions =
+        typeof body.customInstructions === 'string' ? body.customInstructions.trim() : ''
+      const cmd = { type: 'compact', ...(instructions ? { customInstructions: instructions } : {}) }
+      const wait = (compactingWait.get(s.id) ?? 0) + 1
+      compactingWait.set(s.id, wait)
+      const release = () => {
+        const n = (compactingWait.get(s.id) ?? 1) - 1
+        if (n > 0) compactingWait.set(s.id, n)
+        else compactingWait.delete(s.id)
+      }
+      const rpc = s.send(cmd, { timeoutMs: COMPACT_RPC_MS })
+      // pi always answers eventually; after we replied "started" nothing else
+      // holds this promise, so it must not become an unhandled rejection.
+      rpc.catch(() => {})
+      const raced = await Promise.race([
+        rpc.then(
+          (r) => ({ how: 'rpc', r }),
+          (err) => ({ how: 'rpc', err }),
+        ),
+        new Promise((done) => setTimeout(() => done({ how: 'ceiling' }), SUMMARIZE_WAIT_MS)),
+      ])
+      if (raced.how === 'ceiling') {
+        // Hand the outcome over to SSE (compactingWait goes -> the bridge
+        // reports a failure), and answer as a SUCCESS: the compaction is still
+        // running, and a failure toast here invites a second /compact that
+        // double-summarises the session.
+        release()
+        console.log(`[compact] ${s.id}: still summarising after ${SUMMARIZE_WAIT_MS}ms — answering, SSE will finish it`)
+        return sendJson(res, { ok: true, started: true, pending: true })
+      }
+      release()
+      if (raced.err) {
+        const message = String(raced.err?.message ?? raced.err)
+        // tau gave up on the child, not pi giving up on the summary: the
+        // compaction may still land, so say so instead of "failed".
+        if (/timed out/i.test(message))
+          return sendJson(res, apiErr(`${message} — compaction may still land; check the session before retrying`), 504)
+        return sendJson(res, apiErr(message), 500)
+      }
+      const r = raced.r
+      if (r?.success === false) {
+        // pi's own reasons are the useful ones: "Already compacted",
+        // "Nothing to compact (session too small)", "No model selected".
+        return sendJson(res, apiErr(r.error ?? 'compact rejected'), 502)
+      }
+      const d = r?.data ?? {}
+      console.log(
+        `[compact] ${s.id}: ${d.tokensBefore ?? '?'} -> ${d.estimatedTokensAfter ?? '?'} tokens (kept ${d.firstKeptEntryId ?? '?'})`,
+      )
+      return sendJson(res, {
+        ok: true,
+        summary: d.summary ?? '',
+        firstKeptEntryId: d.firstKeptEntryId,
+        tokensBefore: d.tokensBefore,
+        estimatedTokensAfter: d.estimatedTokensAfter,
+        ...(d.usage ? { usage: d.usage } : {}),
+      })
+    }
+    if (rest === '/fork' || rest === '/revert') {
       return sendJson(res, { error: 'not wired in pi-web (mockup)' }, 501)
     }
     return sendJson(res, { error: 'not found' }, 404)
