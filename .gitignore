@@ -8,6 +8,8 @@ web/node_modules/
 web/.logs/
 web/.meta.json
 *.log
+# editor state — nobody else's editor settings belong in the repo
+.vscode/
 compose.override.yml
 config/pi-agent/
 # Operator notes — private by design (hostnames, provider keys, LAN details).

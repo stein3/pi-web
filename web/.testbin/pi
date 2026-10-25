@@ -2,4 +2,6 @@
 # Fake pi for pi-web integration test: replays a scripted stream on RPC mode.
 # Ignores --list-models? No — still serve it so /oc/config/providers works.
 for a in "$@"; do [ "$a" = "--list-models" ] && { printf 'provider   model      context  max-out  thinking  images\ntestprov   fake-1     128K     4K       yes       no\n'; exit 0; }; done
-exec node /workspace/pi-local/web/.testbin/fake-pi.mjs "$@"
+# resolve the fake next to this shim, so a fresh clone runs the checks too
+HERE="$(cd "$(dirname "$0")" && pwd)"
+exec node "$HERE/fake-pi.mjs" "$@"

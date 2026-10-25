@@ -1,0 +1,12 @@
+.git
+__pycache__
+**/__pycache__
+.env
+# runtime state — bind-mounted, never COPY'd into the image
+config
+# pi-web dev artifacts (the script itself IS copied; deps come from the
+# global tau install in the image)
+web/node_modules
+web/.logs
+web/.testbin
+web/package-lock.json

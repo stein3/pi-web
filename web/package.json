@@ -1,14 +1,16 @@
 {
   "name": "web",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "pi-web.mjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node pi-web.mjs",
+    "check": "node .testbin/diff-check.mjs && node .testbin/delete-check.mjs && node .testbin/compact-check.mjs && node .testbin/stream-check.mjs",
+    "test": "npm run check"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "opencode-shaped HTTP/SSE bridge around `pi --mode rpc` (browser backend for the shared nopencode webui)",
   "dependencies": {
     "pi-tau-web-server": "^1.1.8"
   }
