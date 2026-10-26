@@ -25,7 +25,7 @@ import readline from 'node:readline'
 
 const out = (o) => {
   process.stdout.write(JSON.stringify(o) + '\n')
-  if (PERSIST) mirrorEntry(o)
+  mirrorEntry(o)
 }
 
 // --- a transcript on disk, FAKE_PI_PERSIST=1 ---------------------------------
@@ -67,6 +67,7 @@ function ensureSessionFile() {
 }
 
 function persist(entry) {
+  if (!PERSIST) return
   ensureSessionFile()
   if (pFlushed) {
     fs.appendFileSync(pFile, JSON.stringify(entry) + '\n')
@@ -88,14 +89,54 @@ function persist(entry) {
   pPending.length = 0
 }
 
+// --- the entry tree (get_tree, /tau-tree-navigate) -------------------------
+// pi stores an append-only tree: every entry has id/parentId, the current
+// position is the "leaf", and moving the leaf is done by tau's bundled pi
+// extension, which appends a `custom` marker (customType 'tau:navigate-tree')
+// AT the target — the marker becomes the new leaf, because pi re-derives the
+// leaf from the last entry when a file is loaded. pi's native RPC has no
+// leaf-move command, so this is the whole contract tau drives.
+const entries = []
+const byId = new Map()
+let leafId = null
+
+function treeAdd(entry) {
+  entries.push(entry)
+  byId.set(entry.id, entry)
+  leafId = entry.id
+}
+
+function treeOf(id) {
+  const kids = new Map()
+  for (const e of entries) {
+    const p = e.parentId ?? null
+    if (!kids.has(p)) kids.set(p, [])
+    kids.get(p).push(e)
+  }
+  const build = (e) => ({ entry: e, children: (kids.get(e.id) ?? []).map(build) })
+  return entries.filter((e) => !e.parentId || !byId.has(e.parentId)).map(build)
+}
+
+function navTarget(entry) {
+  if (entry.type === 'message' && entry.message?.role === 'user') {
+    const text = (entry.message.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text).join('\n')
+    return { leafTargetId: entry.parentId ?? null, editorText: text }
+  }
+  return { leafTargetId: entry.id }
+}
+
 function mirrorEntry(ev) {
   if (ev?.type === 'message_end' && ev.message) {
     const id = `e${++pSeq}`
-    persist({ type: 'message', id, parentId: pParent, timestamp: new Date().toISOString(), message: ev.message })
+    const entry = { type: 'message', id, parentId: leafId, timestamp: new Date().toISOString(), message: ev.message }
+    treeAdd(entry)
+    persist(entry)
     pParent = id
   } else if (ev?.type === 'session_info_changed' && ev.name) {
     const id = `e${++pSeq}`
-    persist({ type: 'session_info', id, parentId: pParent, timestamp: new Date().toISOString(), name: ev.name })
+    const entry = { type: 'session_info', id, parentId: leafId, timestamp: new Date().toISOString(), name: ev.name }
+    treeAdd(entry)
+    persist(entry)
     pParent = id
   }
 }
@@ -402,6 +443,26 @@ rl.on('line', async (line) => {
     // title-bearing field arrives LAST — the adversarial shape for a bridge that
     // reads the detail line out of partial argument JSON. The bridge must still
     // name the call, and must not turn ~400 deltas into ~400 part frames.
+    // tau's tree-navigation command (pi-tau-web-server/bin/tree.js): matched
+    // extension commands never reach the LLM and never append a user message.
+    if (text.startsWith('/tau-tree-navigate')) {
+      const target = String(text).split(/\s+/)[1] ?? ''
+      const entry = byId.get(target)
+      if (!entry) return fail(cmd, `Entry ${target} not found in the session tree`)
+      const t = navTarget(entry)
+      const marker = {
+        type: 'custom',
+        customType: 'tau:navigate-tree',
+        id: `nav${++pSeq}`,
+        parentId: t.leafTargetId,
+        timestamp: new Date().toISOString(),
+        targetId: entry.id,
+      }
+      treeAdd(marker)
+      persist(marker)
+      resp(cmd, { disposition: 'handled' })
+      return
+    }
     if (text.startsWith('/fake-bigwrite')) {
       await bigWriteTurn(Number(text.slice('/fake-bigwrite'.length).trim()) || 400)
       resp(cmd, { disposition: 'handled' })
@@ -447,6 +508,12 @@ rl.on('line', async (line) => {
     // pi aborts the run and leaves the queues armed
     aborted = true
     resp(cmd)
+  } else if (cmd.type === 'get_tree') {
+    resp(cmd, { leafId, tree: treeOf() })
+  } else if (cmd.type === 'get_commands') {
+    // tau refuses to navigate unless it can see that its extension command is
+    // really loaded — otherwise the command text would fall through to the LLM.
+    resp(cmd, { commands: [{ name: 'tau-tree-navigate', source: 'extension' }, { name: 'help', source: 'builtin' }] })
   } else if (cmd.type === 'get_state' || cmd.type === 'get_session_stats') {
     // pi's get_state reports the transcript path the session WILL write: pi
     // assigns sessionFile in newSession() (core/session-manager.js) long before

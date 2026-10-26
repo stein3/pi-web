@@ -77,6 +77,7 @@ const PI_AGENT_DIR = path.resolve(
 process.env.PI_CODING_AGENT_DIR = PI_AGENT_DIR
 
 const { liveManager } = await import('pi-tau-web-server/bin/sessions.js')
+const { navigateTree, flattenTree, pathFromRoot } = await import('pi-tau-web-server/bin/tree.js')
 const { SESSIONS_DIR } = await import('pi-tau-web-server/bin/config.js')
 const { getAvailableModels } = await import(
   'pi-tau-web-server/bin/model-utils.js'
@@ -271,6 +272,7 @@ function entryFor(tauId) {
       byCall: new Map(),
       toolStart: new Map(),
       file: null, // last sessionFile seen (drives the canonical-uuid alias)
+      revert: null, // opencode-style revert point ({messageID, partID?}) until the next turn
       armed: false,
       named: false, // a name is settled for this child (pi's own, or one we sent)
       queue: { steering: [], followUp: [] },
@@ -487,6 +489,67 @@ function msgId(role, ts, dupSeen) {
 
 function messagesOf(entries) {
   return (entries ?? []).filter((e) => e?.type === 'message' && e.message)
+}
+
+/**
+ * root -> leaf chain of an entry list, by parentId (tau does the same after a
+ * navigation: `session.entries = pathFromRoot(byId, newLeafId)`).
+ *
+ * A pi transcript is an append-only TREE. Without navigation it is linear and
+ * this is a no-op; after a revert the abandoned branch is still in the file, and
+ * pi's own view is the chain ending at the LAST entry (the `tau:navigate-tree`
+ * marker sits at the new leaf). Seeding a resumed child with the raw file instead
+ * re-shows messages the user reverted away — the transcript would disagree with
+ * what the model actually sees.
+ */
+function leafChain(entries) {
+  const list = entries ?? []
+  const byId = new Map()
+  for (const e of list) if (e?.id) byId.set(e.id, e)
+  let leaf = null
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i]?.id && list[i].type !== 'session') {
+      leaf = list[i]
+      break
+    }
+  }
+  if (!leaf) return list
+  const path = []
+  const seen = new Set()
+  let cur = leaf
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id)
+    path.push(cur)
+    cur = cur.parentId ? byId.get(cur.parentId) : null
+  }
+  path.reverse()
+  return path
+}
+
+/**
+ * webui message id -> pi entry id, resolved against the CHILD's own tree.
+ *
+ * Message ids are DERIVED (`msgId(role, timestamp, dup counter)`), so the only
+ * faithful inverse is to walk the same rows with the same function in the same
+ * order — and the rows must be pi's, root->leaf: tau's mirror entries carry no
+ * `id`/`parentId` at all (sessions.js pushes `{type:'message', message}`), so
+ * they cannot name a navigation target, and after a revert the mirror's shape is
+ * whatever the last navigation left behind.
+ */
+async function messageEntryId(s, messageID) {
+  const r = await s.send({ type: 'get_tree' }, { timeoutMs: 15000 })
+  if (r?.success === false) return { error: String(r?.error ?? 'get_tree failed') }
+  const d = r?.data ?? {}
+  const byId = flattenTree(d.tree ?? [])
+  const chain = pathFromRoot(byId, d.leafId ?? null)
+  const dupSeen = new Map()
+  for (const entry of chain) {
+    const m = entry?.type === 'message' ? entry.message : null
+    if (!m || !LIVE_ROLES.has(m.role)) continue
+    if (msgId(m.role, m.timestamp, dupSeen) === messageID) return { entryId: entry.id ?? null }
+  }
+  // an API user may hand us pi's own entry id
+  return chain.some((x) => x?.id === messageID) ? { entryId: messageID } : { error: null }
 }
 
 /**
@@ -1016,6 +1079,15 @@ function onPiEvent(tauId, ev) {
     const mid = msgId(ev.message.role, ev.message.timestamp, e.dup)
     e.cur = { mid, role: ev.message.role, byIndex: new Map(), byTool: new Map() }
     if (ev.message.role === 'user') void autoName(tauId, textOf(ev.message.content))
+    // a revert point is a promise about the NEXT prompt: opencode prunes for
+    // real when the turn starts, so the marker must not outlive it (webui
+    // stores.ts RevertPoint). The leaf already moved, so the transcript is right
+    // either way — a stale marker would just keep cutting the view.
+    if (e.revert) {
+      e.revert = null
+      const ses = liveManager.get(tauId)
+      if (ses) emitSessionUpdated(tauId, ses)
+    }
     emitFor(tauId, 'message.updated', { info: { id: mid, role: ev.message.role, sessionID: tauId, time: { created: isoMs(ev.message.timestamp) } } })
     const c = Array.isArray(ev.message.content) ? ev.message.content : []
     c.forEach((b, i) => emitBlock(tauId, ev.message, b, i, e))
@@ -1419,7 +1491,7 @@ function ocSession(s, publicId, withFile = true) {
     cost: 0,
     agent: undefined,
     model: s.model ? { providerID: s.model.provider || '', id: s.model.id || '' } : undefined,
-    revert: null,
+    revert: live.get(s.id)?.revert ?? null,
   }
 }
 
@@ -1768,7 +1840,7 @@ async function sessionFor(id) {
     byPublicId.set(id, owned.id)
     return owned
   }
-  const entries = readJsonl(file)
+  const entries = leafChain(readJsonl(file))
   const s = await liveManager.resume({
     sessionFile: file,
     cwd: readHeaderCwd(file) ?? PI_CWD,
@@ -1941,12 +2013,11 @@ async function engineCommands() {
 }
 const NOT_WIRED = new Set([
   '/oc/session/fork',
-  '/oc/session/revert',
 ])
 // POST sub-routes that must resume a cold/reaped session instead of 404ing
 // (they run inside a pi child). `/abort` deliberately does NOT: waking a child
 // only to abort it would resurrect a tab nobody asked for.
-const RESUME_ON_POST = new Set(['/prompt_async', '/command', '/queue/clear', '/summarize'])
+const RESUME_ON_POST = new Set(['/prompt_async', '/command', '/queue/clear', '/summarize', '/revert'])
 // opencode surfaces that degrade cleanly to "nothing here"
 const EMPTY_VCS = { '/oc/vcs/diff': [], '/oc/vcs/diff/raw': '' }
 
@@ -2573,7 +2644,48 @@ async function handleApi(req, res, url) {
         ...(d.usage ? { usage: d.usage } : {}),
       })
     }
-    if (rest === '/fork' || rest === '/revert') {
+    if (rest === '/revert' && req.method === 'POST') {
+      // Revert = move pi's session leaf, not delete anything. pi's RPC has no
+      // leaf-move command, so tau's navigateTree drives its bundled extension's
+      // `/tau-tree-navigate <entryId>` and verifies the move with a second
+      // get_tree; picking a USER entry moves the leaf to that entry's PARENT and
+      // hands back its text (the composer refill the webui does client-side).
+      const body = (await readBody(req)) ?? {}
+      const mid = String(body.messageID ?? '').trim()
+      if (!mid) return sendJson(res, apiErr('messageID is required'), 400)
+      if (s.isStreaming || (s.abortState && s.abortState !== 'idle')) {
+        // the webui's isSessionBusy() aborts and retries — the shape is the contract
+        return sendJson(res, { error: 'session is streaming', name: 'SessionBusyError' }, 409)
+      }
+      const e = entryFor(s.id)
+      const nav0 = await messageEntryId(s, mid)
+      if (nav0.error) return sendJson(res, apiErr(`pi could not report the session tree: ${nav0.error}`), 502)
+      if (!nav0.entryId) return sendJson(res, apiErr(`no message ${mid} in this session`), 404)
+      let nav = null
+      try {
+        nav = await navigateTree(s, nav0.entryId)
+      } catch (err) {
+        const msg = String(err?.message ?? err)
+        if (/streaming/i.test(msg)) return sendJson(res, { error: 'session is streaming', name: 'SessionBusyError' }, 409)
+        return sendJson(res, apiErr(`failed to move the session leaf: ${msg}`), 502)
+      }
+      // the boundary every client truncates its view at (webui applyRevert)
+      e.revert = { messageID: mid, ...(body.partID ? { partID: String(body.partID) } : {}) }
+      filesCache.list = null
+      emitSessionUpdated(s.id, s, raw, true)
+      return sendJson(
+        res,
+        {
+          ...(ocSession(s) ?? { ok: true }),
+          // tau hands the reverted text back because an RPC-mode extension cannot
+          // fill an editor; the webui already has it locally, but an API user
+          // should not have to re-read the transcript for it.
+          ...(nav?.editorText ? { editorText: nav.editorText } : {}),
+        },
+        200,
+      )
+    }
+    if (rest === '/fork') {
       return sendJson(res, { error: 'not wired in pi-web (mockup)' }, 501)
     }
     return sendJson(res, { error: 'not found' }, 404)

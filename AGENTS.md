@@ -43,6 +43,16 @@ this file is what matters when you edit the bridge.
   Streaming the detail line out of partial argument JSON is what makes the row
   name the command while the model is still writing it (`partialTitle`,
   `PARTIAL_CAP`, `PI_WEB_TOOL_TITLE_MS`).
+- **Revert moves the leaf; it never deletes.** `POST /oc/session/{id}/revert`
+  drives tau's `navigateTree` (pi's RPC has no leaf-move command — its extension
+  appends a `custom`/`tau:navigate-tree` marker which BECOMES the leaf, because pi
+  re-derives the leaf from the last entry on load). So every projection must walk
+  root→leaf: `sessionFor` seeds `leafChain(readJsonl(file))`, and tau replaces its
+  own mirror after a navigation — dump the file and the user sees the branch they
+  reverted away. Busy is `409 {name:"SessionBusyError"}` (the webui's
+  `isSessionBusy()` aborts and retries), the marker clears on the next user
+  message, and the reverted message id → entry id mapping is resolved against
+  `get_tree`, not tau's mirror, whose pushed entries have no `id`/`parentId`.
 - **SSE volume.** Do not mirror every pi event as `session.updated`: one
   coalesced frame per relevant metadata change, plus one at turn end. Deltas must
   rebuild the assistant text exactly, and a snapshot must equal the delta sum.
@@ -61,10 +71,10 @@ this file is what matters when you edit the bridge.
 ## Checks
 
 ```bash
-cd web && npm test    # diff 23 · delete 27 · compact 32 · hist 6 · title 19 · id 29 · tooltitle 39 · stream 32
+cd web && npm test    # diff 23 · delete 27 · compact 32 · hist 6 · title 19 · id 29 · tooltitle 39 · revert 24 · stream 32
 ```
 
-All eight are self-contained: they seed fixtures, spawn `pi-web` against
+All nine are self-contained: they seed fixtures, spawn `pi-web` against
 `web/.testbin/fake-pi.mjs`, and kill their own child. A check must never depend
 on gitignored data (real transcripts, `config/pi-agent/`) — seed a fixture, or
 prefer one when it happens to exist. `PI_WEB_JS=` / `PI_WEB_SCRIPT=` point the
