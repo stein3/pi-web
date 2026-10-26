@@ -53,6 +53,14 @@ this file is what matters when you edit the bridge.
   `isSessionBusy()` aborts and retries), the marker clears on the next user
   message, and the reverted message id → entry id mapping is resolved against
   `get_tree`, not tau's mirror, whose pushed entries have no `id`/`parentId`.
+- **Compaction is busy, not broken.** pi refuses a prompt outright while it is
+  summarising (core/agent-session.js:1620). Forwarding that as a 502 reads as
+  “your message failed” (the reported `send failed: … prompt_async -> 502`), so
+  the bridge holds the send until `compaction_end` and delivers it
+  (`PI_WEB_COMPACT_SEND_WAIT_MS`); past that window it answers
+  `409 {name:"SessionBusyError"}` — pi never took the text, so the outcome is
+  *known* and retryable, which is why it is not the `504 {unknown:true}` the
+  prompt-timeout rule uses.
 - **SSE volume.** Do not mirror every pi event as `session.updated`: one
   coalesced frame per relevant metadata change, plus one at turn end. Deltas must
   rebuild the assistant text exactly, and a snapshot must equal the delta sum.
@@ -71,7 +79,7 @@ this file is what matters when you edit the bridge.
 ## Checks
 
 ```bash
-cd web && npm test    # diff 23 · delete 27 · compact 32 · hist 6 · title 19 · id 29 · tooltitle 39 · revert 24 · stream 32
+cd web && npm test    # diff 23 · delete 27 · compact 42 · hist 6 · title 19 · id 29 · tooltitle 39 · revert 24 · stream 32
 ```
 
 All nine are self-contained: they seed fixtures, spawn `pi-web` against

@@ -1359,6 +1359,8 @@ function onPiEvent(tauId, ev) {
     return
   }
   if (t === 'compaction_end' || t === 'summarization_retry_finished') {
+    // whatever the outcome, the session can take a prompt again
+    settleCompaction(tauId)
     emitFor(tauId, 'session.next.compaction.ended', { sessionID: tauId })
     // The summary itself is transcript content, and it arrives ONLY here: pi
     // appends a `compaction` entry to its JSONL and never replays it as a
@@ -2044,6 +2046,43 @@ const SUMMARIZE_WAIT_MS = Number(process.env.PI_WEB_SUMMARIZE_WAIT_MS || 40_000)
 const COMPACT_RPC_MS = Number(process.env.PI_WEB_COMPACT_RPC_MS || 600_000)
 const compactingWait = new Map()
 
+// pi refuses a prompt OUTRIGHT while a compaction is running
+// (core/agent-session.js:1620 — "Cannot submit a prompt while compaction is in
+// progress. Wait for compaction to finish and retry."). Forwarding that as a 502
+// throws away work: the user pressed send on a session that was only busy
+// summarising, and the webui's composer treats a 502 as a send failure. pi-web
+// knows when the summary lands (compaction_end), so it holds the send, then
+// sends. Bounded: past the window the answer is 409 SessionBusyError — pi never
+// accepted the text, so the client can retry without risking a duplicate.
+const COMPACT_SEND_WAIT_MS = Number(process.env.PI_WEB_COMPACT_SEND_WAIT_MS || 90_000)
+const compactionSettled = new Map() // tauId -> waiters resolved by compaction_end
+
+function settleCompaction(tauId) {
+  const set = compactionSettled.get(tauId)
+  if (!set?.size) return
+  compactionSettled.delete(tauId)
+  for (const done of set) done()
+}
+
+function waitForCompactionEnd(tauId, ms) {
+  return new Promise((res) => {
+    const set = compactionSettled.get(tauId) ?? new Set()
+    let timer = null
+    const done = () => {
+      if (timer) clearTimeout(timer)
+      set.delete(done)
+      res(true)
+    }
+    set.add(done)
+    compactionSettled.set(tauId, set)
+    timer = setTimeout(() => {
+      set.delete(done)
+      if (!set.size) compactionSettled.delete(tauId)
+      res(false)
+    }, ms)
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Model catalog (feeds GET /oc/config/providers → ComposerModelPicker,
 // ModelSelect, Footer/InfoPanel context sizes).
@@ -2529,7 +2568,22 @@ async function handleApi(req, res, url) {
       // prompts issued inside the settle window and acks them later, so
       // treating it as a failure invites a duplicate execution.
       try {
-        const resp = await s.send(cmd, { timeoutMs: text.startsWith('/') ? 300000 : streaming ? 15000 : 30000 })
+        const ceiling = text.startsWith('/') ? 300000 : streaming ? 15000 : 30000
+        let resp = await s.send(cmd, { timeoutMs: ceiling })
+        if (resp?.success === false && /compaction is in progress/i.test(String(resp.error ?? ''))) {
+          console.log(`[send] ${s.id}: pi is compacting — holding the prompt (${COMPACT_SEND_WAIT_MS}ms) until the summary lands`)
+          const settled = await waitForCompactionEnd(s.id, COMPACT_SEND_WAIT_MS)
+          if (!settled)
+            return sendJson(
+              res,
+              { name: 'SessionBusyError', error: String(resp.error ?? 'compaction in progress') },
+              409,
+            )
+          // another tab may have started a turn while we waited: then this is a
+          // queue request, exactly as the client asked for it
+          if (s.isStreaming) cmd.streamingBehavior = delivery === 'steer' ? 'steer' : 'followUp'
+          resp = await s.send(cmd, { timeoutMs: ceiling })
+        }
         if (resp?.success === false) return sendJson(res, apiErr(resp.error ?? 'prompt rejected'), 502)
       } catch (err) {
         const message = String(err?.message ?? err)

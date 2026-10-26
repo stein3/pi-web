@@ -371,7 +371,86 @@ async function caseAbort() {
   }
 }
 
-for (const c of [caseOk, caseFailFast, caseSlow, caseSlowFail, caseAbort]) {
+// The reported failure: `send failed: POST /oc/session/<id>/prompt_async -> 502`
+// when queueing a message during a compaction. pi refuses a prompt OUTRIGHT
+// while it is summarising (core/agent-session.js:1620 — "Cannot submit a prompt
+// while compaction is in progress. Wait for compaction to finish and retry.")
+// and the bridge forwarded that refusal as a 502 — a send FAILURE for a session
+// that was merely busy summarising. The bridge knows when the summary lands
+// (compaction_end), so it holds the send and delivers it.
+async function caseSendDuringCompaction() {
+  const b = await boot({
+    FAKE_PI_COMPACT: 'slow',
+    FAKE_PI_COMPACT_MS: '900',
+    PI_WEB_SUMMARIZE_WAIT_MS: '300',
+    PI_WEB_COMPACT_SEND_WAIT_MS: '10000',
+  })
+  process.env.__SCRATCH = b.SCRATCH
+  try {
+    const sid = await newSession('send-during-compaction')
+    void summarize(sid)
+    await sleep(250) // inside the summary window
+    const t0 = Date.now()
+    const p = await req(`/oc/session/${sid}/prompt_async`, {
+      method: 'POST',
+      body: { parts: [{ type: 'text', text: 'queued while summarising' }] },
+    })
+    const dt = Date.now() - t0
+    check(p.status === 204, `a send during compaction is not a send failure (${p.status} ${JSON.stringify(p.json?.error ?? p.json ?? '')})`)
+    check(dt >= 550, `the bridge HELD the send for the summary (${dt}ms into a 900ms summary)`)
+    await sleep(1400)
+    const rows = await req(`/oc/session/${sid}/message`)
+    check(
+      JSON.stringify(rows.json ?? '').includes('queued while summarising'),
+      `the held send ran once the summary landed (${(rows.json ?? []).length} message(s))`,
+    )
+    check(ofType('session.next.compaction.ended').length === 1, 'the summary still landed')
+  } finally {
+    b.stop()
+    await sleep(250)
+    fs.rmSync(b.SCRATCH, { recursive: true, force: true })
+    if (failed) console.log('--- server log ---\n' + b.log.slice(-1500))
+  }
+}
+
+// The bounded path: the summary outlives the hold window, so the client gets a
+// RETRYABLE busy. pi never accepted the text, so the outcome is not unknown —
+// 504 {unknown:true} (the timeout invariant) would be wrong here, and so is 502.
+async function caseSendPastWindow() {
+  const b = await boot({
+    FAKE_PI_COMPACT: 'slow',
+    FAKE_PI_COMPACT_MS: '1500',
+    PI_WEB_SUMMARIZE_WAIT_MS: '300',
+    PI_WEB_COMPACT_SEND_WAIT_MS: '400',
+  })
+  process.env.__SCRATCH = b.SCRATCH
+  try {
+    const sid = await newSession('send-past-window')
+    void summarize(sid)
+    await sleep(200)
+    const p = await req(`/oc/session/${sid}/prompt_async`, {
+      method: 'POST',
+      body: { parts: [{ type: 'text', text: 'never got a turn' }] },
+    })
+    check(
+      p.status === 409 && (p.json?.name ?? p.json?.error?.name) === 'SessionBusyError',
+      `past the hold window it is 409 SessionBusyError, not 502 (${p.status} ${JSON.stringify(p.json)})`,
+    )
+    await sleep(1600)
+    const rows = await req(`/oc/session/${sid}/message`)
+    check(
+      !JSON.stringify(rows.json ?? '').includes('never got a turn'),
+      'and the refused text really did not land (the client may retry it)',
+    )
+  } finally {
+    b.stop()
+    await sleep(250)
+    fs.rmSync(b.SCRATCH, { recursive: true, force: true })
+    if (failed) console.log('--- server log ---\n' + b.log.slice(-1500))
+  }
+}
+
+for (const c of [caseOk, caseFailFast, caseSlow, caseSlowFail, caseAbort, caseSendDuringCompaction, caseSendPastWindow]) {
   console.log(`\n===== ${c.name} =====`)
   try {
     await c()

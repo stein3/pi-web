@@ -398,6 +398,7 @@ const logged = { type: 1, name: 1, command: 1, message: 1, level: 1, modelId: 1,
 // session_info entry AND emits `session_info_changed`. Notably pi does NOT
 // rename a session by itself — nothing in pi derives a name.
 let sessionName = null
+let compacting = false
 const fakeRename = (name) => {
   const trimmed = String(name ?? '').trim()
   if (!trimmed) return false
@@ -430,6 +431,9 @@ rl.on('line', async (line) => {
   }
   if (cmd.type === 'prompt') {
     const text = cmd.message ?? ''
+    if (compacting && !text.startsWith('/')) {
+      return fail(cmd, 'Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.')
+    }
     const images = cmd.images
     // fixture-only hook: model a rename that happened INSIDE pi (TUI /name, an
     // extension, another client) — the bridge must follow it, never fight it.
@@ -554,8 +558,14 @@ rl.on('line', async (line) => {
     const mode = process.env.FAKE_PI_COMPACT || 'ok'
     const slow = mode === 'slow' || mode === 'slowfail'
     const ms = Number(process.env.FAKE_PI_COMPACT_MS || (slow ? 1200 : 120))
+    // pi's own guard (core/agent-session.js:1620): a prompt landing during a
+    // summary is REFUSED, not queued. The backstop timer only matters if this
+    // handler throws — the normal paths clear it themselves.
+    compacting = true
+    setTimeout(() => (compacting = false), ms + 25)
     out({ type: 'compaction_start', reason: 'manual' })
     await sleep(ms)
+    compacting = false
     if (mode === 'abort') {
       out({ type: 'compaction_end', reason: 'manual', result: undefined, aborted: true, willRetry: false, errorMessage: undefined })
       fail(cmd, 'Compaction cancelled')
