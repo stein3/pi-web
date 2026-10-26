@@ -20,6 +20,17 @@ this file is what matters when you edit the bridge.
   later frame for a tool part must re-supply it. Copy the patch **only**:
   bash's `details.truncation.content` holds tens of KB and would ride every SSE
   frame. `pi`'s `edit` gives `details.patch`; `write` needs nothing.
+- **A tool part's state is accumulated, never recomputed.** pi puts `id` and
+  `toolName` on `toolcall_start` ONLY, streams the arguments through
+  `toolcall_delta`, emits `toolcall_end` with no top-level `id`, and gives
+  `tool_execution_end` no `args` at all. So `title`/`input`/`metadata` must fall
+  back to what the call itself carried (`byCall[id].input`) — deriving them from
+  the current event yields `title:""` + `input:{}` on the LAST frame, and because
+  the webui shallow-merges, that blank REPLACES a populated line: the row goes
+  blank exactly when the tool finishes and heals only at the post-turn refetch.
+  Streaming the detail line out of partial argument JSON is what makes the row
+  name the command while the model is still writing it (`partialTitle`,
+  `PARTIAL_CAP`, `PI_WEB_TOOL_TITLE_MS`).
 - **SSE volume.** Do not mirror every pi event as `session.updated`: one
   coalesced frame per relevant metadata change, plus one at turn end. Deltas must
   rebuild the assistant text exactly, and a snapshot must equal the delta sum.
@@ -38,10 +49,10 @@ this file is what matters when you edit the bridge.
 ## Checks
 
 ```bash
-cd web && npm test    # diff-check 23 · delete-check 27 · compact-check 32 · hist-check 6 · stream-check 32
+cd web && npm test    # diff 23 · delete 27 · compact 32 · hist 6 · title 19 · tooltitle 39 · stream 32
 ```
 
-All five are self-contained: they seed fixtures, spawn `pi-web` against
+All seven are self-contained: they seed fixtures, spawn `pi-web` against
 `web/.testbin/fake-pi.mjs`, and kill their own child. A check must never depend
 on gitignored data (real transcripts, `config/pi-agent/`) — seed a fixture, or
 prefer one when it happens to exist. `PI_WEB_JS=` / `PI_WEB_SCRIPT=` point the

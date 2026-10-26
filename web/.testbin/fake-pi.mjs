@@ -119,12 +119,29 @@ async function emitAssistant(text) {
     if (DELTA_MS) await sleep(DELTA_MS)
   }
   out({ type: 'message_update', assistantMessageEvent: { type: 'text_end', contentIndex: off, content: full } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: off + 1, id: 'call_1', toolName: 'bash' } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: off + 1, id: 'call_1', toolCall: { id: 'call_1', name: 'bash', arguments: '{"command":"echo hi"}' } } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: off + 2, id: 'call_2', toolName: 'read' } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: off + 2, id: 'call_2', toolCall: { id: 'call_2', name: 'read', arguments: '{"path":"/tmp/x.txt"}' } } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: off + 3, id: 'call_3', toolName: 'edit' } })
-  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: off + 3, id: 'call_3', toolCall: { id: 'call_3', name: 'edit', arguments: EDIT_JSON } } })
+  // pi's REAL tool-call wire shape (docs/json.md + modes/json-event.js), which
+  // the fake used to get wrong in three ways — and every one of them hid a live
+  // transcript bug:
+  //   * `toolcall_start` is the ONLY record that carries id + toolName;
+  //   * the serialized arguments arrive incrementally in `toolcall_delta`;
+  //   * `toolcall_end` carries the complete toolCall and NO top-level id;
+  //   * `tool_execution_end` carries NO args (only start/update do).
+  const calls = [
+    { index: off + 1, id: 'call_1', name: 'bash', args: '{"command":"echo hi"}' },
+    { index: off + 2, id: 'call_2', name: 'read', args: '{"path":"/tmp/x.txt"}' },
+    { index: off + 3, id: 'call_3', name: 'edit', args: EDIT_JSON },
+  ]
+  for (const c of calls) {
+    out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: c.index, id: c.id, toolName: c.name } })
+    for (let i = 0; i < c.args.length; i += 9) {
+      out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_delta', contentIndex: c.index, delta: c.args.slice(i, i + 9) } })
+      if (DELTA_MS) await sleep(DELTA_MS)
+    }
+    out({
+      type: 'message_update',
+      assistantMessageEvent: { type: 'toolcall_end', contentIndex: c.index, toolCall: { id: c.id, name: c.name, arguments: c.args } },
+    })
+  }
   // pi's REAL order (agent-loop.ts): the assistant message_end fires when
   // the LLM stream ends — BEFORE any tool runs. Tools execute next
   // (tool_execution_*), then each toolResult is emitted as its own
@@ -156,13 +173,14 @@ async function runTools() {
   await sleep(TOOL_MS)
   // pi's tool_execution_end hands over the WHOLE ToolResult object
   // ({ content, details }), not its content blocks.
-  out({ type: 'tool_execution_end', toolCallId: 'call_1', toolName: 'bash', args: { command: 'echo hi' }, result: { content: [{ type: 'text', text: 'hi\n' }] }, isError: false })
-  out({ type: 'tool_execution_end', toolCallId: 'call_2', toolName: 'read', args: { path: '/tmp/x.txt' }, result: { content: [{ type: 'text', text: 'file contents\n' }] }, isError: false })
+  // NO args on tool_execution_end: pi's end event is
+  // {toolCallId, toolName, result, isError, durationMs} and nothing else.
+  out({ type: 'tool_execution_end', toolCallId: 'call_1', toolName: 'bash', result: { content: [{ type: 'text', text: 'hi\n' }] }, isError: false })
+  out({ type: 'tool_execution_end', toolCallId: 'call_2', toolName: 'read', result: { content: [{ type: 'text', text: 'file contents\n' }] }, isError: false })
   out({
     type: 'tool_execution_end',
     toolCallId: 'call_3',
     toolName: 'edit',
-    args: EDIT_ARGS,
     result: {
       content: [{ type: 'text', text: 'Successfully replaced 1 block(s) in /tmp/x.txt.' }],
       details: { diff: EDIT_DIFF, patch: EDIT_PATCH, firstChangedLine: 3 },
@@ -181,6 +199,39 @@ async function runTools() {
   out({ type: 'message_end', message: tr2 })
   out({ type: 'message_start', message: tr3 })
   out({ type: 'message_end', message: tr3 })
+}
+
+async function bigWriteTurn(chunks) {
+  const BIG = 'line of content\n'.repeat(4000) // ~76 KB, arrives BEFORE the path
+  const args = JSON.stringify({ content: BIG, path: '/tmp/big.txt' })
+  const t = ts()
+  out({ type: 'turn_start' })
+  await emitUser('/fake-bigwrite')
+  out({ type: 'message_start', message: { role: 'assistant', content: [], provider: 'testprov', model: 'fake-1', timestamp: t } })
+  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: 0, id: 'call_big', toolName: 'write' } })
+  const step = Math.max(64, Math.floor(args.length / chunks))
+  for (let i = 0; i < args.length; i += step) {
+    out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_delta', contentIndex: 0, delta: args.slice(i, i + step) } })
+  }
+  out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 0, toolCall: { id: 'call_big', name: 'write', arguments: args } } })
+  out({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'toolCall', id: 'call_big', name: 'write', arguments: args }],
+      provider: 'testprov', model: 'fake-1', timestamp: t, durationMs: ts() - t,
+      usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 },
+    },
+  })
+  out({ type: 'tool_execution_start', toolCallId: 'call_big', toolName: 'write', args: { content: BIG, path: '/tmp/big.txt' } })
+  out({
+    type: 'tool_execution_end', toolCallId: 'call_big', toolName: 'write',
+    result: { content: [{ type: 'text', text: 'Wrote /tmp/big.txt' }] }, isError: false,
+  })
+  const tr = { role: 'toolResult', toolCallId: 'call_big', toolName: 'write', content: [{ type: 'text', text: 'Wrote /tmp/big.txt' }], isError: false, timestamp: ts(), durationMs: 12 }
+  out({ type: 'message_start', message: tr })
+  out({ type: 'message_end', message: tr })
+  out({ type: 'turn_end' })
 }
 
 async function runTurn(users, withTools) {
@@ -266,6 +317,15 @@ rl.on('line', async (line) => {
     if (text.startsWith('/fake-rename ')) {
       fakeRename(text.slice('/fake-rename '.length))
       await sleep(50)
+      resp(cmd, { disposition: 'handled' })
+      return
+    }
+    // fixture-only hook: ONE tool call whose argument blob is large and whose
+    // title-bearing field arrives LAST — the adversarial shape for a bridge that
+    // reads the detail line out of partial argument JSON. The bridge must still
+    // name the call, and must not turn ~400 deltas into ~400 part frames.
+    if (text.startsWith('/fake-bigwrite')) {
+      await bigWriteTurn(Number(text.slice('/fake-bigwrite'.length).trim()) || 400)
       resp(cmd, { disposition: 'handled' })
       return
     }

@@ -663,6 +663,52 @@ function toolTitle(name, input) {
   return v ? String(v).replace(/\s+/g, ' ').slice(0, 160) : ''
 }
 
+// Minimum gap between two detail-line frames for the SAME streaming tool call.
+// pi emits one `toolcall_delta` per token of argument JSON; the webui shallow-
+// merges part state, so a frame per token is a frame per token of UI work. The
+// authoritative frame always follows at toolcall_end, so coalescing here only
+// costs a slightly staler typing effect.
+const TOOL_TITLE_MS = Math.max(0, Number(process.env.PI_WEB_TOOL_TITLE_MS ?? 250))
+const PARTIAL_CAP = 4096 // bytes of argument JSON scanned for the detail line
+
+// The same fields toolTitle prefers, in the same order.
+const TITLE_KEYS = ['command', 'filePath', 'file_path', 'path', 'pattern', 'url', 'query', 'description']
+const TITLE_RE = (k) => new RegExp(`"${k}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`)
+
+/**
+ * Read the detail line out of a PARTIAL tool-call argument document.
+ *
+ * pi streams a tool call's arguments as `toolcall_delta` fragments, and nothing
+ * else on the wire names the call before it is complete: `toolcall_start` is
+ * `{id, toolName}` and `toolcall_end` is the first record carrying arguments.
+ * So a row that stays blank until the model finishes writing the call — and a
+ * row that shows nothing at all while a long `command` streams — is a choice
+ * about who reads `toolcall_delta`. The value is decoded from however much JSON
+ * has arrived: the field's opening quote is enough, an unterminated escape is
+ * dropped rather than shown raw.
+ */
+function partialTitle(name, text) {
+  if (!text) return ''
+  for (const k of TITLE_KEYS) {
+    const m = TITLE_RE(k).exec(text)
+    if (!m) continue
+    let v = m[1]
+    try {
+      v = JSON.parse('"' + v + '"')
+    } catch {
+      const trimmed = v.replace(/\\+$/, '') // cut mid-escape: show what is unambiguous
+      try {
+        v = JSON.parse('"' + trimmed + '"')
+      } catch {
+        /* keep the raw fragment; toolTitle clips it */
+      }
+    }
+    const t = toolTitle(name, { [k]: v })
+    if (t) return t
+  }
+  return ''
+}
+
 /**
  * Pure projection: pi's message list -> opencode transcript shape.
  *
@@ -931,7 +977,7 @@ function onPiEvent(tauId, ev) {
 
   if (t === 'message_start' && ev.message && LIVE_ROLES.has(ev.message.role)) {
     const mid = msgId(ev.message.role, ev.message.timestamp, e.dup)
-    e.cur = { mid, role: ev.message.role, byIndex: new Map() }
+    e.cur = { mid, role: ev.message.role, byIndex: new Map(), byTool: new Map() }
     if (ev.message.role === 'user') void autoName(tauId, textOf(ev.message.content))
     emitFor(tauId, 'message.updated', { info: { id: mid, role: ev.message.role, sessionID: tauId, time: { created: isoMs(ev.message.timestamp) } } })
     const c = Array.isArray(ev.message.content) ? ev.message.content : []
@@ -982,11 +1028,35 @@ function onPiEvent(tauId, ev) {
       const i = a.contentIndex ?? 0
       const pid = `${cur.mid}:${i}`
       cur.byIndex.set(i, pid)
-      const args = a.type === 'toolcall_end' ? safeJson(a.toolCall?.arguments) : {}
       const name = a.toolName ?? a.toolCall?.name ?? 'tool'
-      // entry-level map: pi emits the assistant message_end BEFORE the
-      // tool_execution_* events, so cur is null by the time they arrive
-      if (a.id) e.byCall.set(a.id, { pid, mid: cur.mid, tool: name, input: args })
+      // pi puts `id`/`toolName` ONLY on toolcall_start (modes/json-event.js);
+      // the end record carries the complete toolCall and NO top-level id. Keying
+      // the join on `a.id` therefore meant the arguments never reached `byCall`,
+      // and every later frame recomputed the title from `{}`.
+      const st = cur.byTool.get(i) ?? { cid: null, name, start: Date.now(), text: '', title: '', at: 0 }
+      st.name = name
+      if (a.id) st.cid = a.id
+      cur.byTool.set(i, st)
+      const args = a.type === 'toolcall_end' ? safeJson(a.toolCall?.arguments) : null
+      let hit = st.cid ? e.byCall.get(st.cid) : null
+      if (args && typeof args === 'object') {
+        if (hit) {
+          hit.tool = name
+          hit.input = args
+        } else if (st.cid) {
+          e.byCall.set(st.cid, { pid, mid: cur.mid, tool: name, input: args, metadata: {} })
+          hit = e.byCall.get(st.cid)
+        }
+      } else if (!hit && st.cid) {
+        e.byCall.set(st.cid, { pid, mid: cur.mid, tool: name, input: {}, metadata: {} })
+        hit = e.byCall.get(st.cid)
+      }
+      const input = hit?.input ?? {}
+      const title = toolTitle(name, input) || st.title
+      if (title) {
+        st.title = title
+        st.at = Date.now()
+      }
       emitFor(tauId, 'message.part.updated', {
         part: {
           id: pid,
@@ -994,14 +1064,53 @@ function onPiEvent(tauId, ev) {
           sessionID: tauId,
           type: 'tool',
           tool: name,
-          callID: a.id,
+          callID: st.cid,
           state: {
             status: 'running',
-            title: toolTitle(name, args),
-            input: args && typeof args === 'object' ? args : {},
+            title,
+            input,
             output: '',
-            metadata: {},
-            time: { start: Date.now() },
+            metadata: hit?.metadata ?? {},
+            time: { start: st.start },
+          },
+        },
+      })
+    } else if (a.type === 'toolcall_delta') {
+      // The argument JSON streams through HERE, and nothing else on the wire
+      // names a tool call before it is complete. Reading the value out of the
+      // partial document is what lets the row show its command/path while the
+      // model is still writing the call, instead of at the end of it.
+      const i = a.contentIndex ?? 0
+      const st = cur.byTool.get(i)
+      if (!st) return
+      st.text += String(a.delta ?? '')
+      // A `write`/`edit` argument blob can be hundreds of KB, and the scan runs
+      // once per delta — so bound WHAT IS SCANNED (the title field lives in the
+      // leading bytes; the COMPLETE object arrives at toolcall_end anyway) rather
+      // than skipping deltas, which would lose the typing effect entirely.
+      if (st.text.length > PARTIAL_CAP) st.text = st.text.slice(0, PARTIAL_CAP)
+      const t = partialTitle(st.name, st.text)
+      if (!t || t === st.title) return
+      const now = Date.now()
+      if (st.title && now - st.at < TOOL_TITLE_MS) return // coalesced: never one frame per token
+      st.title = t
+      st.at = now
+      const hit = st.cid ? e.byCall.get(st.cid) : null
+      emitFor(tauId, 'message.part.updated', {
+        part: {
+          id: `${cur.mid}:${i}`,
+          messageID: cur.mid,
+          sessionID: tauId,
+          type: 'tool',
+          tool: st.name,
+          callID: st.cid,
+          state: {
+            status: 'running',
+            title: t,
+            input: hit?.input ?? {}, // a PARTIAL argument is not an argument
+            output: '',
+            metadata: hit?.metadata ?? {},
+            time: { start: st.start },
           },
         },
       })
@@ -1014,8 +1123,6 @@ function onPiEvent(tauId, ev) {
           : { name: 'APIError', data: { message: String(a.error ?? a.reason ?? 'provider error') } },
       })
     } else {
-      // `toolcall_delta` lives here — the argument JSON streams through it, and
-      // nothing else on the wire exposes a tool call before it is complete.
       noteUnhandled('pi-assistant-event', a.type, a)
     }
     return
@@ -1027,7 +1134,19 @@ function onPiEvent(tauId, ev) {
     if (t === 'tool_execution_start') e.toolStart.set(ev.toolCallId, Date.now())
     const res = t === 'tool_execution_end' ? ev.result : undefined
     const partial = t === 'tool_execution_update' ? ev.partialResult : undefined
-    const input = safeJson(ev.args)
+    // pi's end record is {toolCallId, toolName, result, isError, durationMs} and
+    // carries NO args (only start/update do). Recomputing the detail line from an
+    // absent arguments object blanked a line the tab ALREADY had — the webui
+    // shallow-merges part state, so a blank frame replaces a populated one. The
+    // row went blank exactly when the tool finished and healed only when the
+    // post-turn refetch reprojected the transcript from the JSONL: that is
+    // "tool titles only appear after the turn ends". Fall back to what the call
+    // itself carried.
+    const sent = safeJson(ev.args)
+    const input =
+      sent && typeof sent === 'object' && Object.keys(sent).length ? sent : (hit.input ?? {})
+    const metadata = toolMetadata(input, res?.details)
+    if (Object.keys(metadata).length) hit.metadata = { ...(hit.metadata ?? {}), ...metadata }
     // stamp the start ONCE at tool_execution_start: re-stamping Date.now() on
     // every event gave every live tool a 0ms window. pi's end event carries no
     // durationMs in the wild — use it only when we never saw the start.
@@ -1047,10 +1166,10 @@ function onPiEvent(tauId, ev) {
           status:
             t === 'tool_execution_end' ? (ev.isError ? 'error' : 'completed') : 'running',
           title: toolTitle(ev.toolName, input),
-          input: input && typeof input === 'object' ? input : {},
+          input,
           output: t === 'tool_execution_end' ? textOf(res) : (partial ?? ''),
           // live path: `ev.result` is the ToolResult object, details included
-          metadata: toolMetadata(input, res?.details),
+          metadata,
           time: { start, ...(t === 'tool_execution_end' ? { end: now } : {}) },
         },
       },
