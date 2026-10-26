@@ -1130,9 +1130,12 @@ function readJsonl(file) {
 }
 
 function deriveTitle(entries) {
+  // last name wins, same reason as readSessionMeta: renames append rather than edit
+  let named = ''
   for (const e of entries) {
-    if (e.type === 'session_info' && e.name) return e.name
+    if (e.type === 'session_info' && e.name) named = e.name
   }
+  if (named) return named
   for (const e of entries) {
     if (e.type === 'message' && e.message?.role === 'user') {
       const t = textOf(e.message.content).trim()
@@ -1224,7 +1227,13 @@ function readSessionMeta(file, st) {
   const msgs = messagesOf(entries)
   const users = msgs.filter((m) => m.message.role === 'user').length
   if (users === 0 && entries.length <= 8) return null
-  const info = entries.find((e) => e.type === 'session_info' && e.name)
+  // The CURRENT name, not the first one: a rename APPENDS a session_info entry (pi
+  // does the same, and PATCH title appends here), so `find` returned the title the
+  // session had when it was created and a rename never reached the sidebar. Measured
+  // on a real transcript with three appended names: history said "llama server backup
+  // plan" while the session had been renamed to "pi-web ssh".
+  let info = null
+  for (const e of entries) if (e.type === 'session_info' && e.name) info = e
   const modelChange = [...entries].reverse().find((e) => e.type === 'model_change')
   let tokens
   for (let i = entries.length - 1; i >= 0; i--) {

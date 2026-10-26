@@ -91,6 +91,21 @@ const B = '01bb0000-0000-7000-8000-00000000000b'
 writeSession(path.join(SDIR, WS_SLUG, fname(B)), B, 'hist-check fixture B', [
   { input: 0, output: 0, cacheRead: 0 },
 ])
+// C: renamed twice. A rename APPENDS a session_info entry, so the CURRENT name is
+// the LAST one — `entries.find` returned the creation title and the sidebar kept a
+// stale name forever (real case: "llama server backup plan" vs renamed "pi-web ssh").
+const C = '01cc0000-0000-7000-8000-00000000000c'
+const fileC = path.join(SDIR, WS_SLUG, fname(C))
+writeSession(fileC, C, 'named at creation', [{ input: 10, output: 40 }])
+fs.appendFileSync(
+  fileC,
+  [
+    { type: 'session_info', timestamp: '2026-01-01T00:00:00.500Z', name: 'renamed once' },
+    { type: 'session_info', timestamp: '2026-01-01T00:00:00.600Z', name: 'renamed twice' },
+  ]
+    .map((e) => JSON.stringify(e) + '\n')
+    .join(''),
+)
 
 const child = spawn(
   process.execPath,
@@ -118,12 +133,15 @@ try {
   let rows = []
   for (let i = 0; i < 60 && !rows.length; i++) {
     rows = (await j('/api/history/sessions')).body ?? []
-    if (rows.find((r) => r.id === A) && rows.find((r) => r.id === B)) break
+    if (rows.find((r) => r.id === A) && rows.find((r) => r.id === B) && rows.find((r) => r.id === C)) break
     await new Promise((r) => setTimeout(r, 250))
   }
   const ra = rows.find((r) => r.id === A)
   const rb = rows.find((r) => r.id === B)
-  check(!!ra && !!rb, 'both fixture sessions are listed', `${rows.length} rows`)
+  const rc = rows.find((r) => r.id === C)
+  check(!!ra && !!rb && !!rc, 'all fixture sessions are listed', `${rows.length} rows`)
+  check(rc?.title === 'renamed twice', 'title is the CURRENT name (renames append; last session_info wins)', `title=${JSON.stringify(rc?.title)}`)
+  check(rc?.title !== 'named at creation', 'the creation title never survives a rename', `title=${JSON.stringify(rc?.title)}`)
   if (ra) {
     check(ra.tokens_generated === 230, 'tokens_generated sums output+reasoning over every assistant msg', `got ${ra.tokens_generated}, want 230`)
     check(ra.tokens === 6080, 'tokens stays the newest-record context estimate', `got ${ra.tokens}, want 6080`)
