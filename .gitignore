@@ -12,5 +12,3 @@ web/.meta.json
 .vscode/
 compose.override.yml
 config/pi-agent/
-# Operator notes — private by design (hostnames, provider keys, LAN details).
-AGENTS.md
