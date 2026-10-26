@@ -138,6 +138,45 @@ liveManager.addClient({
 // live session bookkeeping
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// unhandled-record telemetry
+// ---------------------------------------------------------------------------
+// pi and tau both emit more records than this bridge consumes, and a record
+// that falls through `onPiEvent`/`onTauFrame` is invisible: it just never
+// becomes SSE. That is how whole feature paths hide (pi reports a rename as
+// `session_info_changed`, which this bridge never matched) — you cannot debug
+// what you cannot see. So: log the FIRST sighting of every record type no
+// branch looked at, plus a running count every Nth, and keep the tally
+// queryable from /healthz. Bounded by construction — one line per type, never
+// one per token.
+const UNHANDLED_EVERY = Number(process.env.PI_WEB_UNHANDLED_EVERY ?? 500)
+const unhandled = new Map() // 'kind:type' -> count
+
+// A sample that can never be a transcript: keys + truncated scalars only.
+function brief(v) {
+  if (v === null || typeof v !== 'object') return String(v).slice(0, 80)
+  if (Array.isArray(v)) return `[${v.length}]`
+  const out = {}
+  for (const [k, x] of Object.entries(v)) {
+    if (typeof x === 'string') out[k] = x.length > 60 ? `${x.slice(0, 60)}…` : x
+    else if (Array.isArray(x)) out[k] = `[${x.length}]`
+    else if (x && typeof x === 'object') out[k] = `{${Object.keys(x).join(',')}}`
+    else out[k] = x
+  }
+  return out
+}
+
+function noteUnhandled(kind, type, sample) {
+  const key = `${kind}:${type ?? 'unknown'}`
+  const n = (unhandled.get(key) ?? 0) + 1
+  unhandled.set(key, n)
+  if (n === 1 || n % UNHANDLED_EVERY === 0) {
+    console.error(
+      `[unhandled] ${key} n=${n}` + (sample === undefined ? '' : ` ${JSON.stringify(brief(sample))}`),
+    )
+  }
+}
+
 /**
  * tauId -> { ids:Set, dup:Map, cur:{mid, byIndex}, byCall:Map, toolStart:Map }
  * `ids` = every public id this session answers to (tau id + pi file uuid), so
@@ -233,6 +272,7 @@ function entryFor(tauId) {
       toolStart: new Map(),
       file: null, // last sessionFile seen (drives the canonical-uuid alias)
       armed: false,
+      named: false, // a name is settled for this child (pi's own, or one we sent)
       queue: { steering: [], followUp: [] },
       // compactions this bridge SAW happen inside the live child (compaction_end
       // carries the summary; tau's entries never record it). See transcriptEntries().
@@ -265,6 +305,50 @@ function armSession(s) {
   s.send({ type: 'set_follow_up_mode', mode: 'all' }, { timeoutMs: 8000 }).catch(() => {
     e.armed = false // let the next request retry
   })
+}
+
+/**
+ * Name an unnamed session, once, through pi itself.
+ *
+ * `hint` is the live user message when one is arriving right now; otherwise the
+ * first prompt of the transcript is used. Claiming `e.named` before the round
+ * trip is what keeps the RPC, the event it causes, and the next user message
+ * from each starting a rename.
+ */
+async function autoName(tauId, hint) {
+  const e = live.get(tauId)
+  const s = liveManager.get(tauId)
+  if (!e || !s || e.named) return
+  e.named = true
+  const file = s.sessionFile || e.file || null
+  // pi named it (or the operator did): never overwrite an existing name.
+  if (file) {
+    try {
+      if (sessionMeta(file)?.named) return
+    } catch {
+      /* unreadable — fall through and try to name it */
+    }
+  }
+  const name = autoTitle(hint || firstUserText(s.entries) || firstUserText(file ? readJsonl(file) : null))
+  if (!name) {
+    e.named = false
+    return
+  }
+  try {
+    const r = await s.send({ type: 'set_session_name', name }, { timeoutMs: 8000 })
+    if (r?.success === false) {
+      e.named = false
+      return
+    }
+  } catch {
+    e.named = false // child busy/closing: a later message gets another chance
+    return
+  }
+  // pi answers with session_info_changed, which sets the title for us; do it
+  // here too so a pi build that stays quiet still names the tab. Signature-gated:
+  // a name nobody disagrees about needs no frame.
+  e.title = name
+  emitSessionUpdated(tauId, s)
 }
 
 function apiErr(message, name = 'APIError') {
@@ -516,6 +600,55 @@ function safeJson(s) {
   }
 }
 
+/**
+ * Heuristic session title — the bridge is the one that names sessions.
+ *
+ * pi never names a session by itself (no auto-name anywhere in pi), and tau's
+ * `maybeTitle` heuristic lives only in tau's memory, so it can never reach the
+ * sidebar: a sidebar row is a projection of the JSONL. So the bridge derives a
+ * name and hands it to pi's `set_session_name`, which appends the
+ * `session_info` entry — after that pi, the TUI, the read path and the webui all
+ * read the SAME string, and pi reports it back as `session_info_changed`.
+ *
+ * Deliberately dumb: a model call per session on a single-slot local router
+ * costs more than a name is worth. Rules — collapse whitespace (pi normalizes
+ * newlines in names anyway), strip conversational filler, cut at a sentence end
+ * inside the first 80 chars, else clamp to 60 at a word boundary with an
+ * ellipsis, capitalise the first character.
+ */
+const FILLER_PREFIX =
+  /^(?:ok|okay|so|actually|hey|hi|hello|please|can you|could you|would you|i want(?:ed)? to|i wanna|let'?s|now|also|just)\b[\s,:!-]*/i
+
+function autoTitle(text) {
+  if (typeof text !== 'string') return ''
+  let t = text.replace(/\s+/g, ' ').trim()
+  let prev = ''
+  while (t !== prev) {
+    prev = t
+    t = t.replace(FILLER_PREFIX, '').trim()
+  }
+  if (!t) return ''
+  const se = t.search(/[.!?](\s|$)/)
+  if (se > 10 && se < 80) t = t.slice(0, se + 1)
+  if (t.length > 60) {
+    const cut = t.slice(0, 57)
+    const ws = cut.lastIndexOf(' ')
+    t = (ws > 20 ? cut.slice(0, ws) : cut).trimEnd() + '…'
+  }
+  return t.charAt(0).toUpperCase() + t.slice(1)
+}
+
+/** the first user prompt in a set of pi session entries ('' when there is none) */
+function firstUserText(entries) {
+  for (const e of entries ?? []) {
+    if (e?.type === 'message' && e.message?.role === 'user') {
+      const t = textOf(e.message.content).trim()
+      if (t) return t
+    }
+  }
+  return ''
+}
+
 function toolTitle(name, input) {
   if (!input || typeof input !== 'object') return ''
   const v =
@@ -750,7 +883,14 @@ function onTauFrame(frame) {
     }
     return
   }
-  if (frame.type !== 'event' || !frame.event || !frame.sessionId) return
+  if (frame.type !== 'event') {
+    noteUnhandled('tau-frame', frame.type, frame.session ? { id: frame.session.id } : undefined)
+    return
+  }
+  if (!frame.event || !frame.sessionId) {
+    noteUnhandled('tau-event-malformed', Object.keys(frame).join('+'))
+    return
+  }
   onPiEvent(frame.sessionId, frame.event)
 }
 
@@ -769,16 +909,30 @@ function onPiEvent(tauId, ev) {
     return
   }
 
+  if (t === 'session_info_changed') {
+    // pi's own rename (TUI /name, set_session_name from any client, an
+    // extension). This one is authoritative: pi has already persisted a
+    // session_info entry, so the sidebar row will show it on the next read.
+    e.title = ev.name || null
+    e.named = !!ev.name
+    emitSessionUpdated(tauId, session)
+    return
+  }
+
   if (t === 'session_name' && ev.name) {
-    e.title = ev.name
-    // auto-title / rename: the webui follows it (markSessionListDirty)
-    emitSessionUpdated(tauId, session, undefined, true)
+    // tau's in-memory heuristic (maybeTitle): a candidate, not a fact — it is
+    // never written to the JSONL, so the file-backed sidebar row cannot show it.
+    // Show it now, then make it real through pi so both agree.
+    if (!e.named) e.title = ev.name
+    void autoName(tauId)
+    emitSessionUpdated(tauId, session)
     return
   }
 
   if (t === 'message_start' && ev.message && LIVE_ROLES.has(ev.message.role)) {
     const mid = msgId(ev.message.role, ev.message.timestamp, e.dup)
     e.cur = { mid, role: ev.message.role, byIndex: new Map() }
+    if (ev.message.role === 'user') void autoName(tauId, textOf(ev.message.content))
     emitFor(tauId, 'message.updated', { info: { id: mid, role: ev.message.role, sessionID: tauId, time: { created: isoMs(ev.message.timestamp) } } })
     const c = Array.isArray(ev.message.content) ? ev.message.content : []
     c.forEach((b, i) => emitBlock(tauId, ev.message, b, i, e))
@@ -859,6 +1013,10 @@ function onPiEvent(tauId, ev) {
           ? { name: 'MessageAbortedError', data: { message: 'aborted' } }
           : { name: 'APIError', data: { message: String(a.error ?? a.reason ?? 'provider error') } },
       })
+    } else {
+      // `toolcall_delta` lives here — the argument JSON streams through it, and
+      // nothing else on the wire exposes a tool call before it is complete.
+      noteUnhandled('pi-assistant-event', a.type, a)
     }
     return
   }
@@ -1031,6 +1189,9 @@ function onPiEvent(tauId, ev) {
     emitFor(tauId, 'session.idle', { sessionID: tauId })
     return
   }
+
+  // Nothing above claimed it: name it, or it stays invisible forever.
+  noteUnhandled('pi-event', t, ev)
 }
 
 function emitBlock(tauId, msg, b, i, e) {
@@ -1173,6 +1334,26 @@ function listFiles() {
  * string otherwise. Rename (not unlink) keeps deletes recoverable; pi appends
  * per write, so the owning child must already be closed — see the DELETE route.
  */
+/**
+ * Append the session_info entry pi would have written for a rename, and drop
+ * that file's cached projection so the sidebar re-reads it. For the cases with
+ * no live child to ask (or one that would not answer). The path must stay put:
+ * pi holds it open via --session.
+ */
+function appendSessionInfo(file, name) {
+  if (!file || !name) return false
+  try {
+    fs.appendFileSync(
+      file,
+      JSON.stringify({ type: 'session_info', name, timestamp: new Date().toISOString() }) + '\n',
+    )
+    metaCache.delete(file)
+    return true
+  } catch {
+    return false // read-only tree
+  }
+}
+
 function trashSessionFile(file) {
   try {
     fs.mkdirSync(TRASH_DIR, { recursive: true })
@@ -1274,6 +1455,9 @@ function readSessionMeta(file, st) {
     model_provider: modelChange?.provider ?? '',
     ...(tokens ? { tokens } : {}),
     ...(generated ? { tokens_generated: generated } : {}),
+    // an explicit name (any session_info entry) vs the prompt-derived fallback:
+    // the bridge must never rename a session pi or the operator already named
+    named: !!info,
     uuid: header.id,
   }
 }
@@ -1432,6 +1616,9 @@ async function sessionFor(id) {
   byPublicId.set(id, s.id)
   seedDup(entries, e)
   armSession(s)
+  // a session opened from the sidebar that pi never named gets named now, so
+  // the row, the tab and the TUI stop disagreeing about what it is called
+  void autoName(s.id)
   return s
 }
 
@@ -1972,24 +2159,33 @@ async function handleApi(req, res, url) {
       }
       if (req.method === 'PATCH') {
         const body = await readBody(req)
+        const name = typeof body.title === 'string' ? body.title.trim() : ''
         const s = sessionByAnyId(raw)
-        if (s && typeof body.title === 'string') {
+        if (name && s) {
           const e = entryFor(s.id)
-          e.title = body.title
-          // tau-style rename: append session_info (file path must stay put —
-          // pi already holds the file open via --session)
-          if (s.sessionFile) {
-            try {
-              fs.appendFileSync(
-                s.sessionFile,
-                JSON.stringify({ type: 'session_info', name: body.title, timestamp: new Date().toISOString() }) + '\n',
-              )
-              filesCache.list = null
-            } catch {
-              /* read-only tree — keep in-memory title only */
-            }
+          e.title = name
+          e.named = true // the auto-tiler must not undo a rename the operator made
+          // Ask pi to rename its own session: it persists the session_info entry
+          // AND emits session_info_changed, so pi, the TUI and every other
+          // client learn the name. Appending to the file behind the child did
+          // neither — the child kept its old name, and could rewrite it away.
+          let renamed = false
+          try {
+            const r = await s.send({ type: 'set_session_name', name }, { timeoutMs: 8000 })
+            renamed = r?.success !== false
+          } catch {
+            /* child not answering */
           }
+          if (!renamed) appendSessionInfo(s.sessionFile || fileForId(raw), name)
           emitSessionUpdated(s.id, s, raw, true)
+        } else if (name) {
+          // No live child: the file is the only thing to write. Doing nothing
+          // here meant renaming a closed session answered ok and then silently
+          // reverted to the prompt on the next sidebar poll.
+          const file = fileForId(raw)
+          if (!file) return sendJson(res, { error: 'unknown session' }, 404)
+          if (!appendSessionInfo(file, name)) return sendJson(res, apiErr(`failed to write ${file}`), 500)
+          filesCache.list = null
         }
         return sendJson(res, { ok: true })
       }
@@ -2278,7 +2474,15 @@ async function handleApi(req, res, url) {
   }
   if (pathname === '/api/search') return sendJson(res, searchSessions(q.get('q') || ''))
 
-  if (pathname === '/healthz') return sendJson(res, { ok: true, live: liveManager.sessions.size })
+  if (pathname === '/healthz') {
+    return sendJson(res, {
+      ok: true,
+      live: liveManager.sessions.size,
+      // which records no branch looked at, and how often — `curl :8124/healthz`
+      // answers "did the bridge even see that event?" without log spelunking
+      unhandled: Object.fromEntries(unhandled),
+    })
+  }
 
   return sendJson(res, { error: 'not found' }, 404)
 }

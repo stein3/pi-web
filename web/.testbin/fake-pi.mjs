@@ -17,6 +17,7 @@
 //   * "/name" runs synchronously (no queue) and only acks "handled" when the
 //     handler returns;
 //   * abort does NOT clear the queues.
+import fs from 'node:fs'
 import readline from 'node:readline'
 
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n')
@@ -216,6 +217,25 @@ async function run(text, images) {
 }
 
 const rl = readline.createInterface({ input: process.stdin })
+
+// What the bridge actually ASKED pi, line by line. Some behaviors are invisible
+// in the SSE stream (a rename is an RPC the bridge must send, not an event it
+// receives), so a check asserts on this. FAKE_PI_RPC_LOG=<file>.
+const rpcLog = process.env.FAKE_PI_RPC_LOG || null
+const logged = { type: 1, name: 1, command: 1, message: 1, level: 1, modelId: 1, mode: 1 }
+
+// pi's own rename path (core/agent-session.js `setSessionName`): appends a
+// session_info entry AND emits `session_info_changed`. Notably pi does NOT
+// rename a session by itself — nothing in pi derives a name.
+let sessionName = null
+const fakeRename = (name) => {
+  const trimmed = String(name ?? '').trim()
+  if (!trimmed) return false
+  sessionName = trimmed
+  out({ type: 'session_info_changed', name: sessionName })
+  return true
+}
+
 rl.on('line', async (line) => {
   let cmd
   try {
@@ -223,9 +243,32 @@ rl.on('line', async (line) => {
   } catch {
     return
   }
+  if (rpcLog) {
+    const rec = {}
+    for (const [k, v] of Object.entries(cmd)) if (logged[k] && typeof v !== 'object') rec[k] = String(v).slice(0, 120)
+    try {
+      fs.appendFileSync(rpcLog, JSON.stringify(rec) + '\n')
+    } catch {
+      /* keep running even if the log target is gone */
+    }
+  }
+  if (cmd.type === 'set_session_name') {
+    // pi: an empty name is refused; a real one persists and reports itself.
+    if (!String(cmd.name ?? '').trim()) return fail(cmd, 'Session name cannot be empty')
+    if (!fakeRename(cmd.name)) return fail(cmd, 'Session name cannot be empty')
+    return resp(cmd)
+  }
   if (cmd.type === 'prompt') {
     const text = cmd.message ?? ''
     const images = cmd.images
+    // fixture-only hook: model a rename that happened INSIDE pi (TUI /name, an
+    // extension, another client) — the bridge must follow it, never fight it.
+    if (text.startsWith('/fake-rename ')) {
+      fakeRename(text.slice('/fake-rename '.length))
+      await sleep(50)
+      resp(cmd, { disposition: 'handled' })
+      return
+    }
     if (text.startsWith('/')) {
       // extension command: runs now even during a run, acks when the handler
       // returns — this is the unbounded-ack case
