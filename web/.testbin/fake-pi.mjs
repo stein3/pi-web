@@ -18,9 +18,87 @@
 //     handler returns;
 //   * abort does NOT clear the queues.
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import crypto from 'node:crypto'
 import readline from 'node:readline'
 
-const out = (o) => process.stdout.write(JSON.stringify(o) + '\n')
+const out = (o) => {
+  process.stdout.write(JSON.stringify(o) + '\n')
+  if (PERSIST) mirrorEntry(o)
+}
+
+// --- a transcript on disk, FAKE_PI_PERSIST=1 ---------------------------------
+// The id contract cannot be tested without it: real pi mints
+// `<agentDir>/sessions/--<cwd-mangled>--/<ts>_<uuid>.jsonl` the moment the
+// session has a user or assistant message (setup entries stay in memory), keeps
+// the header's id when launched with `--session <file>`, and appends one line
+// per entry afterwards. Off by default so the older checks are untouched.
+const PERSIST = process.env.FAKE_PI_PERSIST === '1'
+let pFile = null
+let pFlushed = false
+let pHeader = null
+let pParent = null
+let pSeq = 0
+const pPending = []
+
+function sessionDirFor(cwd) {
+  const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent')
+  return path.join(agentDir, 'sessions', `--${cwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`)
+}
+
+function ensureSessionFile() {
+  if (pFile) return pFile
+  const i = process.argv.indexOf('--session')
+  if (i >= 0 && process.argv[i + 1]) {
+    pFile = path.resolve(process.argv[i + 1])
+    try {
+      pHeader = JSON.parse(fs.readFileSync(pFile, 'utf8').split('\n')[0])
+      pFlushed = fs.statSync(pFile).size > 0 // pi: the file is there -> append to it
+    } catch {
+      pHeader = null
+    }
+    return pFile
+  }
+  const stamp = new Date().toISOString()
+  pHeader = { type: 'session', version: 3, id: crypto.randomUUID(), timestamp: stamp, cwd: process.cwd() }
+  pFile = path.join(sessionDirFor(process.cwd()), `${stamp.replace(/[:.]/g, '-')}_${pHeader.id}.jsonl`)
+  return pFile
+}
+
+function persist(entry) {
+  ensureSessionFile()
+  if (pFlushed) {
+    fs.appendFileSync(pFile, JSON.stringify(entry) + '\n')
+    return
+  }
+  pPending.push(entry)
+  // pi writes the file only once there is a conversation to write
+  if (!pPending.some((e) => e.type === 'message' && (e.message.role === 'user' || e.message.role === 'assistant'))) return
+  fs.mkdirSync(path.dirname(pFile), { recursive: true })
+  const header = pHeader ?? { type: 'session', version: 3, id: crypto.randomUUID(), timestamp: new Date().toISOString(), cwd: process.cwd() }
+  const fd = fs.openSync(pFile, 'wx') // pi creates it exclusively, header first
+  try {
+    fs.writeFileSync(fd, JSON.stringify(header) + '\n')
+    for (const e of pPending) fs.writeFileSync(fd, JSON.stringify(e) + '\n')
+  } finally {
+    fs.closeSync(fd)
+  }
+  pFlushed = true
+  pPending.length = 0
+}
+
+function mirrorEntry(ev) {
+  if (ev?.type === 'message_end' && ev.message) {
+    const id = `e${++pSeq}`
+    persist({ type: 'message', id, parentId: pParent, timestamp: new Date().toISOString(), message: ev.message })
+    pParent = id
+  } else if (ev?.type === 'session_info_changed' && ev.name) {
+    const id = `e${++pSeq}`
+    persist({ type: 'session_info', id, parentId: pParent, timestamp: new Date().toISOString(), name: ev.name })
+    pParent = id
+  }
+}
 const ts = () => Date.now()
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -370,7 +448,31 @@ rl.on('line', async (line) => {
     aborted = true
     resp(cmd)
   } else if (cmd.type === 'get_state' || cmd.type === 'get_session_stats') {
-    resp(cmd, {})
+    // pi's get_state reports the transcript path the session WILL write: pi
+    // assigns sessionFile in newSession() (core/session-manager.js) long before
+    // the bytes exist, and tau probes get_state 250ms after every start. pi-web's
+    // create route needs that path: the uuid inside it is the one public id the
+    // tab, the sidebar row and the file will all share. Only in FAKE_PI_PERSIST
+    // mode — the older fixtures have no transcript at all and assert other things.
+    resp(
+      cmd,
+      cmd.type === 'get_state' && PERSIST
+        ? {
+            model: 'fake-1',
+            thinkingLevel,
+            isStreaming: running,
+            isCompacting: false,
+            steeringMode: 'manual',
+            followUpMode: followMode,
+            sessionFile: ensureSessionFile(),
+            sessionId: pHeader?.id ?? null,
+            sessionName,
+            autoCompactionEnabled: false,
+            messageCount: 0,
+            pendingMessageCount: steerQ.length + followQ.length,
+          }
+        : {},
+    )
   } else if (cmd.type === 'compact') {
     // pi's manual compaction (core/agent-session.js `compact()`): it aborts any
     // live run FIRST, emits compaction_start, generates the summary, appends

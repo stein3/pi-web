@@ -244,7 +244,7 @@ async function reapIdleChildren() {
   }
   for (const s of doomed) {
     const file = s.sessionFile
-    if (!file) continue // no transcript yet — closing it would lose the chat
+    if (!file || !fs.existsSync(file)) continue // no transcript yet — closing it would lose the chat
     const ids = [...publicIdsFor(s.id)]
     for (const id of ids) reapedFile.set(id, file)
     INTERNAL_CLOSE.set(s.id, file)
@@ -434,6 +434,37 @@ function sessionByAnyId(id) {
     if (owned) return owned
   }
   return null
+}
+
+/**
+ * Make a fresh child's transcript uuid public BEFORE answering the create call.
+ * pi computes the path — and the uuid inside it — in `newSession()`
+ * (core/session-manager.js), long before the bytes exist; the file itself only
+ * appears once the session has a conversation entry. tau probes `get_state` 250 ms
+ * after every start to learn it, which is AFTER `POST /oc/session` has answered,
+ * so the response used to carry the per-child handle instead: the tab opened as
+ * `tau_*`, pi then wrote `<ts>_<uuid>.jsonl`, and the sidebar listed the SAME
+ * session under its uuid — two rows, two tabs, one transcript. Waiting here costs
+ * one idle RPC round trip; a child that never answers keeps the old fallback and
+ * the alias mechanism still adopts the uuid later.
+ */
+async function learnPublicId(s) {
+  const budget = Number(process.env.PI_WEB_ID_WAIT_MS ?? 2000)
+  const deadline = Date.now() + budget
+  while (!s.sessionFile && Date.now() < deadline) {
+    // halfway, ask for ourselves rather than wait for tau's own probe to land
+    if (Date.now() > deadline - budget / 2 && !s.__piWebProbed) {
+      s.__piWebProbed = true
+      try {
+        await s.send({ type: 'get_state' }, { timeoutMs: 3000 })
+      } catch {
+        /* not in RPC mode yet, or busy — the fallback id still works */
+      }
+    } else {
+      await new Promise((r) => setTimeout(r, 40))
+    }
+  }
+  return publicIdsFor(s.id)
 }
 
 // ---------------------------------------------------------------------------
@@ -855,7 +886,13 @@ function isoMs(ts) {
 // ---------------------------------------------------------------------------
 
 function emitFor(tauId, type, properties) {
-  for (const id of publicIdsFor(tauId)) emit(type, { ...properties, sessionID: id })
+  // ONE frame per event, addressed by the session's canonical public id (pi's
+  // transcript uuid as soon as the child knows its file). `publicIdsFor` keeps the
+  // tau handle resolvable INBOUND — a tab that opened with it can still address the
+  // session — but echoing every frame to both ids doubled the entire SSE stream for
+  // any session whose child knew its file (a 120-delta turn arrived as 240+ frames).
+  const s = liveManager.get(tauId)
+  emit(type, { ...properties, sessionID: canonicalId(s) ?? tauId })
 }
 
 /**
@@ -1461,6 +1498,9 @@ function listFiles() {
  */
 function appendSessionInfo(file, name) {
   if (!file || !name) return false
+  // NEVER create a transcript here: pi writes its own header with `wx` at the
+  // first conversation entry, so a file we made first would make pi throw.
+  if (!fs.existsSync(file)) return false
   try {
     fs.appendFileSync(
       file,
@@ -1474,6 +1514,9 @@ function appendSessionInfo(file, name) {
 }
 
 function trashSessionFile(file) {
+  // A session created and then deleted never had a conversation, so pi never
+  // wrote the path it told us about: nothing to move, child already closed.
+  if (!fs.existsSync(file)) return null
   try {
     fs.mkdirSync(TRASH_DIR, { recursive: true })
     const ext = path.extname(file)
@@ -1688,7 +1731,10 @@ function toHistMsgs(entries) {
 
 function fileForId(id) {
   const s = sessionByAnyId(id)
-  if (s?.sessionFile) return s.sessionFile
+  // A fresh child knows the path pi WILL write, but no bytes exist yet: handing
+  // that path out would have the bridge resume a transcript that is not there,
+  // and pi would mint a SECOND uuid inside a file named after the first.
+  if (s?.sessionFile && fs.existsSync(s.sessionFile)) return s.sessionFile
   if (reapedFile.has(id)) return reapedFile.get(id) // child reaped; file still there
   const byId = allSessionMeta().find((m) => m.id === id)
   if (byId) return byId.file
@@ -2231,6 +2277,8 @@ async function handleApi(req, res, url) {
     const s = await liveManager.create({ cwd, model: modelSpec(body?.model) })
     entryFor(s.id)
     armSession(s)
+    // answer with pi's id, not the per-child handle: see learnPublicId
+    await learnPublicId(s)
     filesCache.list = null
     return sendJson(res, ocSession(s), 201)
   }

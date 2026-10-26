@@ -4,7 +4,7 @@
   "main": "pi-web.mjs",
   "scripts": {
     "start": "node pi-web.mjs",
-    "check": "node .testbin/diff-check.mjs && node .testbin/delete-check.mjs && node .testbin/compact-check.mjs && node .testbin/hist-check.mjs && node .testbin/title-check.mjs && node .testbin/tooltitle-check.mjs && node .testbin/stream-check.mjs",
+    "check": "node .testbin/diff-check.mjs && node .testbin/delete-check.mjs && node .testbin/compact-check.mjs && node .testbin/hist-check.mjs && node .testbin/title-check.mjs && node .testbin/id-check.mjs && node .testbin/tooltitle-check.mjs && node .testbin/stream-check.mjs",
     "test": "npm run check"
   },
   "keywords": [],

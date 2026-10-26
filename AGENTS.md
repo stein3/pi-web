@@ -10,7 +10,19 @@ this file is what matters when you edit the bridge.
 - **Ids.** The public session id is the uuid in pi's `<ts>_<uuid>.jsonl`. tau's
   `tau_*` ids are per-child handles: they change on resume, and a reaped child's
   id must keep resolving (`reapedFile` / `reapAlias`). Get this wrong and one
-  session becomes two sidebar rows and two tabs.
+  session becomes two sidebar rows and two tabs. Three things hold that up:
+  `POST /oc/session` waits (bounded, `PI_WEB_ID_WAIT_MS`) for pi's `get_state`
+  before answering, because pi computes that path and uuid in `newSession()` —
+  it *knows* them long before the file exists, and tau's own probe lands 250 ms
+  after our response would have;
+  `emitFor` addresses **one** id (the canonical one), while the alias set stays
+  inbound-only — emitting to every alias put a second copy of every frame on the
+  wire for every session whose child knew its file (a resumed turn arrived as
+  `Hello Hello streamed streamed world.world.` when the deltas were joined);
+  and a `sessionFile` pi has not written yet is NOT a transcript — `fileForId`,
+  the idle reaper, `appendSessionInfo` and `trashSessionFile` must all check,
+  since resuming a file that isn't there makes pi mint a second uuid inside a
+  file named after the first.
 - **Delete.** Removing a session must move the **JSONL** to
   `<agentDir>/sessions-trash` — outside every directory `listFiles()` walks — and
   resolve that file *before* closing the child. Closing the child only makes the
@@ -49,10 +61,10 @@ this file is what matters when you edit the bridge.
 ## Checks
 
 ```bash
-cd web && npm test    # diff 23 · delete 27 · compact 32 · hist 6 · title 19 · tooltitle 39 · stream 32
+cd web && npm test    # diff 23 · delete 27 · compact 32 · hist 6 · title 19 · id 29 · tooltitle 39 · stream 32
 ```
 
-All seven are self-contained: they seed fixtures, spawn `pi-web` against
+All eight are self-contained: they seed fixtures, spawn `pi-web` against
 `web/.testbin/fake-pi.mjs`, and kill their own child. A check must never depend
 on gitignored data (real transcripts, `config/pi-agent/`) — seed a fixture, or
 prefer one when it happens to exist. `PI_WEB_JS=` / `PI_WEB_SCRIPT=` point the
