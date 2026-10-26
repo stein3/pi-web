@@ -702,7 +702,7 @@ const infoSig = new Map() // tauId -> signature of the last session.updated sent
 
 function sessionSig(s) {
   if (!s) return ''
-  const i = ocSession(s)
+  const i = ocSession(s, undefined, false) // signature never carries time/tokens: skip the file stat
   if (!i) return ''
   return [
     i.title ?? '',
@@ -1059,16 +1059,46 @@ function emitBlock(tauId, msg, b, i, e) {
 // opencode session projection
 // ---------------------------------------------------------------------------
 
-function ocSession(s, publicId) {
+function ocSession(s, publicId, withFile = true) {
   if (!s) return null
   const e = live.get(s.id)
   const title = e?.title || s.sessionName || null
+  const id = publicId ?? canonicalId(s)
+  const active = Date.parse(s.lastActiveAt) || 0
+  // tau's `lastActiveAt` is NOT "the session changed": it moves when a child attaches
+  // (opening a tab resumes one) and whenever that child emits any event, so an idle
+  // tab pins its row at browse time forever — measured live: two attached-but-idle
+  // children reported 13:05:03 while their JSONLs last changed at 12:24 and 05:17.
+  // A session row means "when did this transcript last change", so the file's own
+  // clock wins; tau's clock is only the fallback for a child with no known file (never
+  // prompted yet), and a busy session's file lags by at most one message.
+  let meta = null
+  if (withFile) {
+    // No `fileForId(id)` fallback here: it walks (and re-primes) the 1500 ms
+    // listFilesCached() TTL, and doing that from a projection makes the cold-resume
+    // path see a file list that predates a freshly seeded transcript — compact-check
+    // then 404s `POST /summarize` on a cold session. `sessionFile` is set for every
+    // child tau knows about, and `reapedFile` covers the closed ones.
+    const file = s.sessionFile || reapedFile.get(id) || null
+    if (file) {
+      try {
+        meta = sessionMeta(file)
+      } catch {
+        /* unreadable: fall back to tau's clock */
+      }
+    }
+  }
+  const updated = meta?.updated || active || Date.now()
   return {
     // canonical (uuid) unless the caller asked for a specific alias
-    id: publicId ?? canonicalId(s),
+    id,
     title: title || undefined,
     cwd: s.cwd || undefined,
-    time: { created: Date.parse(s.createdAt) || Date.now(), updated: Date.parse(s.lastActiveAt) || Date.now() },
+    time: { created: Date.parse(s.createdAt) || Date.now(), updated },
+    // cumulative generated tokens (output+reasoning over every assistant message), same
+    // definition as the history projection, so a live tab's overlay cannot stay frozen at
+    // an older partial sum. Omitted for an all-zero tally, exactly like the history rows.
+    ...(meta?.tokens_generated ? { tokens_generated: meta.tokens_generated } : {}),
     cost: 0,
     agent: undefined,
     model: s.model ? { providerID: s.model.provider || '', id: s.model.id || '' } : undefined,
@@ -1209,6 +1239,20 @@ function readSessionMeta(file, st) {
       break
     }
   }
+  // Generated tokens — what the model produced: output + reasoning summed over
+  // EVERY assistant message (the `tokens` above is a one-record context
+  // estimate, which is what the sidebar used to show). pi stores usage on the
+  // assistant message itself — 85/85 assistant messages in a real transcript,
+  // and no separate `usage` entries — so summing message.usage cannot double
+  // count. Same definition as chatserver's message-level sum for opencode, and
+  // the same SELF-ONLY scope: pi-web sessions have no parent link, so the
+  // webui's descendant rollup is a no-op here.
+  let generated = 0
+  for (const m of msgs) {
+    const u = m.message?.role === 'assistant' ? m.message.usage : null
+    if (!u) continue
+    generated += (u.output ?? u.completionTokens ?? 0) + (u.reasoning ?? 0)
+  }
   return {
     file,
     cwd: header.cwd || undefined,
@@ -1220,6 +1264,7 @@ function readSessionMeta(file, st) {
     model: modelChange?.modelId ?? '',
     model_provider: modelChange?.provider ?? '',
     ...(tokens ? { tokens } : {}),
+    ...(generated ? { tokens_generated: generated } : {}),
     uuid: header.id,
   }
 }
