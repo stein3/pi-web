@@ -43,7 +43,7 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
 // ---------------------------------------------------------------------------
@@ -285,6 +285,21 @@ function entryFor(tauId) {
       // (the webui's 10s busy-reconcile watchdog reads it and clears busy AND
       // compacting from it), the idle reaper — must consult this flag too.
       compacting: false,
+      // The LAST compaction's outcome, in the shape the UI's box renders from:
+      // { state: 'running'|'ok'|'failed'|'cancelled'|'rejected', reason, at,
+      //   tokensBefore }. It lives here (not only in SSE frames) because the
+      // webui re-derives live state from GET /session/status after every
+      // reconnect and on its 10s tick — a failure that exists only in one
+      // dropped frame is invisible by the time the tab repaints. pi appends NO
+      // JSONL entry for a failed compaction, so this is the only place the
+      // reason survives at all.
+      compaction: null,
+      // Engine telemetry for THIS session (see the engine-probe section): the
+      // last shape published, its dedupe key, and the bridge's own event-stream
+      // counters used as the fallback when there is no engine to ask.
+      engine: null,
+      engineSent: '',
+      derived: null,
       revert: null, // opencode-style revert point ({messageID, partID?}) until the next turn
       armed: false,
       named: false, // a name is settled for this child (pi's own, or one we sent)
@@ -540,6 +555,91 @@ function leafChain(entries) {
 }
 
 /**
+ * pi's own session-id shape: uuidv7 (core/session-manager.js `createSessionId`).
+ * The transcript FILE name carries it, and the file name is the public id, so it
+ * is worth producing the same flavour pi does (time-ordered, sortable).
+ */
+function newSessionId() {
+  const b = randomBytes(16)
+  let ms = Date.now()
+  for (let i = 5; i >= 0; i--) {
+    b[i] = ms & 0xff
+    ms = Math.floor(ms / 256)
+  }
+  b[6] = (b[6] & 0x0f) | 0x70 // version 7
+  b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+  const h = b.toString('hex')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+}
+
+/** how many forks already point at this transcript (the webui wants "(fork #N)") */
+function forkCount(file) {
+  let n = 0
+  for (const f of listFiles()) {
+    if (path.resolve(f) === path.resolve(file)) continue
+    const h = readJsonl(f).find((e) => e?.type === 'session')
+    if (h?.parentSession && path.resolve(h.parentSession) === path.resolve(file)) n++
+  }
+  return n
+}
+
+/**
+ * Fork a transcript the way pi's `SessionManager.forkFrom` does — a new
+ * `<ts>_<uuid>.jsonl` written `wx`, a header carrying `parentSession: <source>`,
+ * then the copied entries — with three differences the webui needs: only the
+ * ACTIVE path is copied (`leafChain`, so a reverted branch does not come back to
+ * life), it is cut at the fork point (pi's own `position: "before"`: the picked
+ * message is EXCLUDED), and the fork is NAMED, because the webui says the engine
+ * titles the fork itself. Naming it with a `session_info` entry also marks it as
+ * named, so the auto-tiler will not overwrite it.
+ *
+ * The point of doing this on the file instead of through pi's `fork`/`clone` RPC:
+ * pi's runtime fork REBINDS the live child to the new file — right for the TUI,
+ * which switches into the fork, wrong here, where the old tab stays open under its
+ * own uuid and would go on writing the NEW transcript.
+ */
+function forkTranscript(file, keepEntries, name) {
+  const srcHeader = readJsonl(file).find((e) => e?.type === 'session') ?? {}
+  const stamp = new Date().toISOString()
+  const id = newSessionId()
+  const dest = path.join(path.dirname(file), `${stamp.replace(/[:.]/g, '-')}_${id}.jsonl`)
+  const header = {
+    type: 'session',
+    version: 3,
+    id,
+    timestamp: stamp,
+    cwd: srcHeader.cwd ?? PI_CWD,
+    parentSession: path.resolve(file),
+  }
+  const fd = fs.openSync(dest, 'wx') // never clobber
+  try {
+    fs.writeFileSync(fd, JSON.stringify(header) + '\n')
+    for (const e of keepEntries) fs.writeFileSync(fd, JSON.stringify(e) + '\n')
+    if (name) {
+      const last = keepEntries.length ? keepEntries[keepEntries.length - 1].id : null
+      fs.writeFileSync(fd, JSON.stringify({ type: 'session_info', id: 'forkname', parentId: last, timestamp: stamp, name }) + '\n')
+    }
+  } finally {
+    fs.closeSync(fd)
+  }
+  return { file: dest, id }
+}
+
+/**
+ * webui message id -> entry id inside a FILE's chain (the fork reads the file,
+ * not a child, so the same derived-id walk has to work without RPC).
+ */
+function entryIdInChain(chain, messageID) {
+  const dupSeen = new Map()
+  for (const entry of chain) {
+    const m = entry?.type === 'message' ? entry.message : null
+    if (!m || !LIVE_ROLES.has(m.role)) continue
+    if (msgId(m.role, m.timestamp, dupSeen) === messageID) return entry.id ?? null
+  }
+  return chain.some((x) => x?.id === messageID) ? messageID : null
+}
+
+/**
  * webui message id -> pi entry id, resolved against the CHILD's own tree.
  *
  * Message ids are DERIVED (`msgId(role, timestamp, dup counter)`), so the only
@@ -595,6 +695,9 @@ function compactionRow(entry) {
   const mid = compactionId(entry)
   const created = Date.parse(entry.timestamp ?? '') || 0
   const before = Number(entry.tokensBefore)
+  const after = Number(entry.estimatedTokensAfter)
+  // The interim part's human line (see parts[1]); the typed part carries no
+  // prose so a component can own the wording.
   const head = `⟳ Context compacted${Number.isFinite(before) ? ` — ${before.toLocaleString('en-US')} tokens summarised` : ''}`
   const summary = String(entry.summary ?? '').trim()
   return {
@@ -611,11 +714,40 @@ function compactionRow(entry) {
         }
       : undefined,
     compacted: true, // for checks/clients; normalizeMessages drops unknown keys
+    // A TYPED part, because a component needs something to put a box around and
+    // the numbers must arrive structured: `normalizeMessages` (webui sse.ts:219)
+    // whitelists part keys — type/text/state/synthetic survive, ROW-level keys
+    // are dropped — so `type` + `state` are the only marker that reaches a
+    // component. The head line is deliberately NOT invented into `text`: pi's
+    // summary lands raw and the component owns the wording. (Until the webui
+    // grows the branch, Transcript.svelte:116 renders nothing for this type —
+    // the accepted bridge-first window.)
     parts: [
       {
         id: `${mid}:0`,
+        type: 'compaction',
+        text: summary,
+        synthetic: true,
+        state: {
+          status: 'ok',
+          at: created || undefined,
+          ...(Number.isFinite(before) ? { tokensBefore: before } : {}),
+          ...(Number.isFinite(after) ? { tokensAfter: after } : {}),
+          ...(entry.firstKeptEntryId ? { firstKeptEntryId: String(entry.firstKeptEntryId) } : {}),
+        },
+      },
+      // INTERIM part, for a webui that has no 'compaction' branch: its part
+      // filter (Transcript.svelte:116) is text/reasoning/tool/file, so without
+      // this the row renders BLANK. It carries the human head line + the summary
+      // — i.e. exactly what this row looked like before the typed part existed.
+      // When the box lands (M3) it must IGNORE text parts on a message that has
+      // a compaction part, and this part comes out of the bridge.
+      {
+        id: `${mid}:1`,
         type: 'text',
-        text: summary ? `**${head}**\n\n${summary}` : `**${head}**`,
+        text: summary
+          ? `**${head}**\n\n${summary}`
+          : `**${head}**`,
         synthetic: true,
       },
     ],
@@ -1155,6 +1287,7 @@ function onPiEvent(tauId, ev) {
         },
       })
     } else if (a.type === 'text_delta' || a.type === 'thinking_delta') {
+      noteDerived(e, (a.delta ?? '').length)
       const i = a.contentIndex ?? 0
       const pid = cur.byIndex.get(i) ?? `${cur.mid}:${i}`
       cur.byIndex.set(i, pid)
@@ -1385,6 +1518,8 @@ function onPiEvent(tauId, ev) {
   }
 
   if (t === 'agent_settled') {
+    e.engine = null // the box goes away with the turn; a stale block would sit there forever
+    e.derived = null
     // one forced metadata frame per turn: it carries the fresh `updated` the
     // sidebar orders by, and the webui's session.updated branch schedules the
     // post-turn transcript refetch (it is busy-gated, so mid-turn frames can
@@ -1395,6 +1530,8 @@ function onPiEvent(tauId, ev) {
     return
   }
   if (t === 'agent_start' || t === 'turn_start') {
+    e.derived = newDerived() // prefill = turn_start -> first delta, rate = delta cadence
+    e.engine = null
     emitFor(tauId, 'session.status', { sessionID: tauId, status: { type: 'busy' } })
     return
   }
@@ -1403,12 +1540,28 @@ function onPiEvent(tauId, ev) {
     // /summarize handler): compaction starts in the TUI, at the context ceiling
     // and on a retry too, and every one of those must read as busy.
     e.compacting = true
+    e.derived = newDerived()
+    // The box's live state starts here, before the first engine sample: a
+    // summary that never produces telemetry still has to render as running.
+    e.compaction = { state: 'running', at: Date.now() }
     emitFor(tauId, 'session.next.compaction.started', { sessionID: tauId })
     return
   }
   if (t === 'compaction_end' || t === 'summarization_retry_finished') {
     // whatever the outcome, the session can take a prompt again
     e.compacting = false
+    const done = !ev.aborted && !ev.errorMessage && ev.result?.summary
+    // ONE sentence for this failure, recorded before any surface reads it: the
+    // open /summarize POST, the SSE tile below and GET /session/status all quote
+    // this string, so the toast, the tile and the box cannot disagree. pi's
+    // compaction_end message is the canonical one (its RPC error response
+    // carries the same failure UNprefixed).
+    e.compaction = {
+      state: done ? 'ok' : ev.aborted ? 'cancelled' : 'failed',
+      reason: ev.errorMessage ?? null,
+      at: Date.now(),
+      ...(Number.isFinite(Number(ev.result?.tokensBefore)) ? { tokensBefore: Number(ev.result.tokensBefore) } : {}),
+    }
     settleCompaction(tauId)
     emitFor(tauId, 'session.next.compaction.ended', { sessionID: tauId })
     // The summary itself is transcript content, and it arrives ONLY here: pi
@@ -1416,7 +1569,6 @@ function onPiEvent(tauId, ev) {
     // message, and tau's entries only ever hold message events. Record it so
     // the read path can project it, then ship the row live so the open tab
     // shows it without a reload. Same id the file entry will produce.
-    const done = !ev.aborted && !ev.errorMessage && ev.result?.summary
     if (done) {
       const entry = {
         type: 'compaction',
@@ -1424,6 +1576,7 @@ function onPiEvent(tauId, ev) {
         summary: ev.result.summary,
         firstKeptEntryId: ev.result.firstKeptEntryId,
         tokensBefore: ev.result.tokensBefore,
+        estimatedTokensAfter: ev.result.estimatedTokensAfter,
         usage: ev.result.usage,
       }
       const known = e.compactions.some((c) => compactionId(c) === compactionId(entry))
@@ -2062,13 +2215,11 @@ async function engineCommands() {
   commandCache.ttl = commandCache.data.length ? 5 * 60_000 : 10_000
   return commandCache.data
 }
-const NOT_WIRED = new Set([
-  '/oc/session/fork',
-])
+const NOT_WIRED = new Set([])
 // POST sub-routes that must resume a cold/reaped session instead of 404ing
 // (they run inside a pi child). `/abort` deliberately does NOT: waking a child
 // only to abort it would resurrect a tab nobody asked for.
-const RESUME_ON_POST = new Set(['/prompt_async', '/command', '/queue/clear', '/summarize', '/revert'])
+const RESUME_ON_POST = new Set(['/prompt_async', '/command', '/queue/clear', '/summarize', '/revert', '/fork'])
 // opencode surfaces that degrade cleanly to "nothing here"
 const EMPTY_VCS = { '/oc/vcs/diff': [], '/oc/vcs/diff/raw': '' }
 
@@ -2234,6 +2385,207 @@ function storeProviders() {
   return providers
 }
 
+// ---------------------------------------------------------------------------
+// Engine telemetry — what the thinking box (and the compaction box) renders.
+//
+// Why the bridge PROBES at all: pi says nothing about the request it is waiting
+// on — no phase, no prefill progress, no rate — and during a compaction it emits
+// nothing between compaction_start and compaction_end. The engine knows: GET
+// /status answers {busy, phase, prompt_tokens, generated, max_tokens} in ~177 B,
+// and GET /metrics' `live` field adds prompt_read/prompt_total/tok_s. (Verified
+// 2026-07-29: there is NO /metrics.live — 404 — `live` is a field inside a 13.9
+// KB /metrics that also carries hardware + history arrays. So /status is the
+// cheap call and /metrics rides ONLY while the engine says it is working.)
+//
+// Discipline, because this file has been burned by every one of these:
+//   · one in-flight fetch per engine, results CACHED in the live entry — never
+//     on the request path;
+//   · ZERO requests while nothing is busy: this is the agent's own model, and a
+//     poller that never stops is load on the thing it measures;
+//   · a wedged slot must not pile up: a per-call timeout, then park the engine
+//     until the next busy transition;
+//   · ONE engine slot and `requests[].projection === null` means the engine
+//     cannot say WHICH session generated what. With more than one busy session
+//     the bridge refuses to attach numbers (`ambiguous`) — a mislabelled tok_s
+//     is worse than none. What it CAN say is that a summary is running, because
+//     the bridge recorded `compacting`: the engine itself cannot tell a summary
+//     from a turn.
+// Discovery is pi's own: providers[] from models-store.json carry `routerBase`
+// (baseUrl minus /v1). A provider with none (cloud) gets the derived fallback.
+// ---------------------------------------------------------------------------
+
+const ENGINE_PROBE_MS = Number(process.env.PI_WEB_ENGINE_PROBE_MS || 1000)
+const ENGINE_TIMEOUT_MS = Number(process.env.PI_WEB_ENGINE_TIMEOUT_MS || 500)
+const ENGINE_FAIL_LIMIT = Number(process.env.PI_WEB_ENGINE_FAIL_LIMIT || 3)
+const ENGINE_FETCHES = new Map() // routerBase -> {fails, parked, inflight, status, live, at}
+
+function engineBases() {
+  const out = []
+  for (const p of storeProviders()) if (p.routerBase && !out.includes(p.routerBase)) out.push(p.routerBase)
+  return out
+}
+
+/** The engine a session is talking to ('' = we cannot tell, so we do not guess). */
+function engineBaseFor(s) {
+  const bases = engineBases()
+  if (!bases.length) return ''
+  const pid = String(s.model?.provider ?? String(s.modelSpec ?? '').split('/')[0] ?? '')
+  const hit = pid ? storeProviders().find((p) => p.id === pid && p.routerBase) : null
+  if (hit) return hit.routerBase
+  // tau reports the modelSpec it SPAWNED with, which a session created without a
+  // model leaves empty. With exactly ONE engine configured there is nothing to
+  // get wrong; with several, refuse rather than attach the wrong numbers.
+  return bases.length === 1 ? bases[0] : ''
+}
+
+/** routerBase -> live session ids generating right now (a turn OR a summary). */
+function busyByEngineBase() {
+  const g = new Map()
+  for (const s of liveManager.sessions.values()) {
+    const e = live.get(s.id)
+    if (!s.isStreaming && !e?.compacting) continue
+    const base = engineBaseFor(s)
+    if (!base) continue
+    if (!g.has(base)) g.set(base, [])
+    g.get(base).push(s.id)
+  }
+  return g
+}
+
+async function engineFetch(base, p) {
+  try {
+    const res = await fetch(base + p, {
+      signal: AbortSignal.timeout(ENGINE_TIMEOUT_MS),
+      headers: { accept: 'application/json' },
+    })
+    if (!res.ok) return null // a plain llama.cpp has no /metrics: nothing to learn, not an error
+    return await res.json()
+  } catch {
+    return null // unreachable / wedged / slow
+  }
+}
+
+async function engineSample(base) {
+  const st =
+    ENGINE_FETCHES.get(base) ?? { fails: 0, parked: false, inflight: false, status: null, live: null, at: 0 }
+  ENGINE_FETCHES.set(base, st)
+  if (st.inflight || st.parked) return st
+  st.inflight = true
+  const s = await engineFetch(base, '/status')
+  const m = s?.busy ? await engineFetch(base, '/metrics') : null
+  st.inflight = false
+  if (!s) {
+    st.fails++
+    if (st.fails >= ENGINE_FAIL_LIMIT) {
+      st.parked = true
+      console.log(`[engine] ${base}: ${st.fails} probes failed — parked until the next busy turn`)
+    }
+    return st
+  }
+  st.fails = 0
+  st.status = s
+  st.live = m?.live ?? null
+  st.at = Date.now()
+  // per-request stats (reused / hit_rate) live in /metrics' requests[] and only
+  // exist AFTER a request ends — keep the newest as the box's "last turn" line
+  if (m?.requests?.length) st.lastRequest = m.requests.at(-1)
+  return st
+}
+
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+
+function engineShape(st) {
+  const s = st.status ?? {}
+  const l = st.live ?? {}
+  return {
+    source: 'engine',
+    at: st.at || Date.now(),
+    phase: l.state === 'reading' ? 'thinking' : l.state === 'decoding' ? 'answering' : (s.phase ?? null),
+    prompt_read: num(l.prompt_read) ?? num(s.prompt_tokens),
+    prompt_total: num(l.prompt_total),
+    generated: num(l.generated) ?? num(s.generated),
+    max_tokens: num(l.max_tokens) ?? num(s.max_tokens),
+    tok_s: num(l.tok_s),
+    // per-request reuse exists only AFTER a request ends, so it belongs to the
+    // PREVIOUS turn — labelled as such rather than shown as if it were live
+    reused: num(st.lastRequest?.reused),
+    hit_rate: num(st.lastRequest?.hit_rate),
+  }
+}
+
+const newDerived = () => ({ t0: Date.now(), first: 0, last: 0, chars: 0 })
+
+function noteDerived(e, chars) {
+  const d = e.derived ?? (e.derived = newDerived())
+  const now = Date.now()
+  if (!d.first) d.first = now
+  d.last = now
+  d.chars += Math.max(0, chars | 0)
+}
+
+/**
+ * No engine to ask (cloud, parked, wedged, plain llama.cpp): estimate the same
+ * shape from pi's own event stream. Marked `source:'derived'` so the UI can show
+ * it as approximate, and it never invents a bar total it cannot know.
+ */
+function derivedShape(e) {
+  const d = e?.derived
+  if (!d) return { source: 'derived', at: Date.now(), phase: 'thinking', prompt_read: null, prompt_total: null, generated: 0, tok_s: null, prefill_ms: null }
+  const gen = Math.round(d.chars / 4) // chars→tokens is a rough /4
+  const decodeMs = d.first ? Math.max(0, d.last - d.first) : 0
+  return {
+    source: 'derived',
+    at: Date.now(),
+    phase: d.first ? 'answering' : 'thinking',
+    prefill_ms: d.first ? d.first - d.t0 : null,
+    prompt_read: null,
+    prompt_total: null,
+    generated: gen,
+    tok_s: decodeMs > 250 ? +((gen / decodeMs) * 1000).toFixed(1) : null,
+  }
+}
+
+async function engineTick() {
+  const groups = busyByEngineBase()
+  const generating = new Set()
+  for (const [base, ids] of groups) {
+    const st = await engineSample(base)
+    const shape =
+      ids.length > 1
+        ? {
+            source: st.status ? 'engine' : 'derived',
+            ambiguous: true,
+            at: st.at || Date.now(),
+            phase: null,
+            prompt_read: null,
+            prompt_total: null,
+            generated: null,
+            max_tokens: null,
+            tok_s: null,
+          }
+        : st.status
+          ? engineShape(st)
+          : derivedShape(live.get(ids[0]))
+    for (const id of ids) {
+      const e = live.get(id)
+      if (!e) continue
+      generating.add(id)
+      e.engine = shape
+      const key = JSON.stringify(shape)
+      if (e.engineSent === key) continue // one frame per change, not one per tick
+      e.engineSent = key
+      emitFor(id, 'session.status', { sessionID: id, status: { type: 'engine', ...shape } })
+    }
+  }
+  // A parked engine wakes on the next busy transition; anything no longer
+  // generating drops its block, because the webui re-derives live state from the
+  // status map and a stale entry would sit in the box forever.
+  for (const [base, st] of ENGINE_FETCHES) if (!groups.has(base)) st.parked = false
+  for (const [id, e] of live) {
+    if (e.engine && !generating.has(id)) e.engine = null
+  }
+}
+
 /** A store-less llama.cpp setup still names its router in auth.json. */
 function authRouterBase() {
   const raw = readJson(path.join(PI_AGENT_DIR, 'auth.json')) ?? {}
@@ -2376,7 +2728,15 @@ async function handleApi(req, res, url) {
     for (const s of liveManager.sessions.values()) {
       const busy = !!s.isStreaming || live.get(s.id)?.compacting === true
       const ids = publicIdsFor(s.id)
-      for (const id of ids) out[id] = { type: busy ? 'busy' : 'idle' }
+      const rec = live.get(s.id)?.compaction ?? null
+      const eng = live.get(s.id)?.engine ?? null
+      for (const id of ids) {
+        out[id] = {
+          type: busy ? 'busy' : 'idle',
+          ...(rec ? { compaction: rec } : {}),
+          ...(eng ? { engine: eng } : {}),
+        }
+      }
     }
     return sendJson(res, out)
   }
@@ -2725,19 +3085,34 @@ async function handleApi(req, res, url) {
         return sendJson(res, { ok: true, started: true, pending: true })
       }
       release()
+      // ONE sentence per failure: pi's `compaction_end` message is the canonical
+      // string and is recorded on the live entry the moment it lands, so the
+      // HTTP body, the SSE tile and GET /session/status quote the same text.
+      // tau's own error carries the SAME failure unprefixed — printing both is
+      // how a toast and a box end up disagreeing about one event.
+      const recorded = () => live.get(s.id)?.compaction?.reason ?? null
       if (raced.err) {
         const message = String(raced.err?.message ?? raced.err)
         // tau gave up on the child, not pi giving up on the summary: the
         // compaction may still land, so say so instead of "failed".
         if (/timed out/i.test(message))
           return sendJson(res, apiErr(`${message} — compaction may still land; check the session before retrying`), 504)
-        return sendJson(res, apiErr(message), 500)
+        return sendJson(res, apiErr(recorded() ?? message), 500)
       }
       const r = raced.r
       if (r?.success === false) {
         // pi's own reasons are the useful ones: "Already compacted",
-        // "Nothing to compact (session too small)", "No model selected".
-        return sendJson(res, apiErr(r.error ?? 'compact rejected'), 502)
+        // "Nothing to compact (session too small)", "No model selected". These
+        // are REJECTS — pi never started a summary, so no compaction_start/end
+        // fired and nothing else would record why the box went quiet.
+        const reason = recorded() ?? String(r.error ?? 'compact rejected')
+        const ent = live.get(s.id)
+        // Only a REJECT that never started a summary gets this state. pi's
+        // compact() also answers success:false when the summary itself threw —
+        // compaction_end already recorded 'failed' then, and clobbering it with
+        // 'rejected' would lose the fact that a summary was really attempted.
+        if (ent && !ent.compaction) ent.compaction = { state: 'rejected', reason, at: Date.now() }
+        return sendJson(res, apiErr(reason), 502)
       }
       const d = r?.data ?? {}
       console.log(
@@ -2793,8 +3168,54 @@ async function handleApi(req, res, url) {
         200,
       )
     }
-    if (rest === '/fork') {
-      return sendJson(res, { error: 'not wired in pi-web (mockup)' }, 501)
+    if (rest === '/fork' && req.method === 'POST') {
+      // The webui contract (api.ts forkSession, Transcript.svelte forkFrom,
+      // commands.ts /fork): return the NEW session (id + title); the engine
+      // copies everything BEFORE the picked message and titles the fork itself.
+      // No child is spawned for the fork — the new tab's first request resumes it
+      // through the normal cold path, with the uuid as its public id from byte one.
+      const body = (await readBody(req)) ?? {}
+      const mid = String(body.messageID ?? '').trim()
+      const file = fileForId(raw)
+      if (!file || !fs.existsSync(file)) {
+        // a created-but-never-prompted session has no transcript to copy
+        return sendJson(res, apiErr('this session has no transcript to fork yet'), 400)
+      }
+      const chain = leafChain(readJsonl(file)).filter((e) => e.type !== 'session')
+      let keep = chain
+      if (mid) {
+        const entryId = entryIdInChain(chain, mid)
+        if (!entryId) return sendJson(res, apiErr(`no message ${mid} in this session`), 404)
+        const i = chain.findIndex((e) => e.id === entryId)
+        if (i < 0) return sendJson(res, apiErr(`message ${mid} is not on this session's active path`), 400)
+        keep = chain.slice(0, i) // pi's position:"before" — the picked message is excluded
+      }
+      const n = forkCount(file) + 1
+      const parentTitle = sessionMeta(file)?.title ?? ''
+      let fork = null
+      try {
+        fork = forkTranscript(file, keep, `${parentTitle} (fork #${n})`.trim())
+      } catch (err) {
+        return sendJson(res, apiErr(`failed to write the fork: ${String(err?.message ?? err)}`), 500)
+      }
+      filesCache.list = null
+      const meta = sessionMeta(fork.file)
+      console.log(`[fork] ${raw}: ${keep.length} of ${chain.length} entries -> ${path.basename(fork.file)} (parent ${path.basename(file)})`)
+      return sendJson(
+        res,
+        {
+          id: fork.id,
+          title: meta?.title ?? `${parentTitle} (fork #${n})`,
+          cwd: meta?.cwd ?? s?.cwd ?? PI_CWD,
+          time: { created: meta?.created ?? Date.now(), updated: meta?.updated ?? Date.now() },
+          ...(meta?.tokens ? { tokens: meta.tokens } : {}),
+          ...(meta?.tokens_generated ? { tokens_generated: meta.tokens_generated } : {}),
+          cost: 0,
+          model: { providerID: meta?.model_provider ?? '', id: meta?.model ?? '' },
+          revert: null,
+        },
+        200,
+      )
     }
     return sendJson(res, { error: 'not found' }, 404)
   }
@@ -2924,6 +3345,14 @@ const server = http.createServer(async (req, res) => {
 })
 
 // heartbeat: sse.ts treats >30s of silence on an OPEN stream as dead
+// Engine telemetry: one global 1 Hz tick. It issues ZERO requests while nothing
+// is busy, and never blocks a request handler (results land in the live entry).
+if (ENGINE_PROBE_MS > 0) {
+  setInterval(() => {
+    engineTick().catch((e) => console.log('[engine] probe failed:', e?.message ?? e))
+  }, ENGINE_PROBE_MS)
+}
+
 const hb = setInterval(() => emit('heartbeat', {}), 10000)
 hb.unref?.()
 
