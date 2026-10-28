@@ -79,7 +79,7 @@ this file is what matters when you edit the bridge.
 ## Checks
 
 ```bash
-cd web && npm test    # diff 23 · delete 27 · compact 42 · hist 6 · title 19 · id 29 · tooltitle 39 · revert 24 · stream 32
+cd web && npm test    # diff 23 · delete 27 · compact 45 · hist 6 · title 19 · id 29 · tooltitle 39 · revert 24 · stream 32
 ```
 
 All nine are self-contained: they seed fixtures, spawn `pi-web` against

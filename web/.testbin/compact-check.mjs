@@ -263,6 +263,36 @@ async function caseOk() {
       `session.compacted fires so the webui clears "Compacting" AND refetches (${seen('session.compacted').length})`,
     )
 
+    // The summary row must keep the POSITION it happened at. pi appends its
+    // `compaction` entry mid-branch, so once the conversation continues the row
+    // is not the newest thing in the transcript. Regression (2026-10-28):
+    // transcriptEntries() APPENDED the bridge's live copy — for a live child
+    // tau's mirror holds no compaction entries at all, so the dedupe set was
+    // always empty — and every refetch re-rendered "Context compacted" as the
+    // most recent message for as long as the child stayed live (hours).
+    const nBefore = rows.length
+    await req(`/oc/session/${sid}/prompt_async`, {
+      method: 'POST',
+      body: { parts: [{ type: 'text', text: 'carry on after the summary' }] },
+    })
+    for (let i = 0; i < 40; i++) {
+      const now = (await req(`/oc/session/${sid}/message`)).json || []
+      if (now.length > nBefore + 1) break
+      await sleep(150)
+    }
+    const later = (await req(`/oc/session/${sid}/message`)).json || []
+    const cmpRows = later.filter((r) => String(r.id).startsWith('cmp_'))
+    const cmpIdx = later.findIndex((r) => String(r.id).startsWith('cmp_'))
+    check(cmpRows.length === 1, `exactly one summary row after a later turn (${cmpRows.length})`)
+    check(
+      cmpIdx >= 0 && cmpIdx < later.length - 1,
+      `the summary row is NOT the newest row after a later turn (cmp at ${cmpIdx} of ${later.length})`,
+    )
+    check(
+      String(later.at(-1)?.id ?? '').startsWith('m_'),
+      `the newest row is the post-compaction turn (${later.at(-1)?.id})`,
+    )
+
     // unknown id still 404s, it is not swallowed by the new route
     const ghost = await summarize('00000000-0000-4000-8000-000000000000')
     check(ghost.status === 404, `unknown session -> 404 (${ghost.status})`)

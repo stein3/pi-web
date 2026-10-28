@@ -620,12 +620,43 @@ function compactionRow(entry) {
  * reaped and the file re-read. Live compactions are therefore kept here and
  * merged in, deduped by id against the file copy.
  */
+/**
+ * Entry timestamp in ms, across the three entry shapes that reach the read path:
+ * pi's JSONL entries (ISO string at the top level), tau's pushed entries (the
+ * stamp lives on `message`), and the bridge's synthesized compaction entry (ISO
+ * string). NaN means unknown, and unknown never becomes an insertion point.
+ */
+function entryTime(entry) {
+  const raw = entry?.timestamp ?? entry?.message?.timestamp
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : NaN
+  const p = Date.parse(String(raw ?? ''))
+  return Number.isFinite(p) ? p : NaN
+}
+
 function transcriptEntries(s, e) {
   const base = s?.entries ?? []
-  const extra = e?.compactions ?? []
-  if (!extra.length) return base
   const seen = new Set(base.filter((x) => x?.type === 'compaction').map(compactionId))
-  return [...base, ...extra.filter((c) => !seen.has(compactionId(c)))]
+  const add = (e?.compactions ?? []).filter((c) => !seen.has(compactionId(c)))
+  if (!add.length) return base
+  // Splice in at the moment the compaction HAPPENED, never at the end. For a
+  // live child `base` holds no compaction entry at all, so the dedupe above is
+  // always empty and an append re-rendered "Context compacted" as the newest
+  // message on every refetch — for hours, until the child was reaped — even
+  // though whole turns had gone past it (compact-check caseOk).
+  const out = [...base]
+  for (const c of add.sort((a, b) => entryTime(a) - entryTime(b))) {
+    const t = entryTime(c)
+    let at = out.length
+    if (Number.isFinite(t)) {
+      at = out.findIndex((x) => {
+        const xt = entryTime(x)
+        return Number.isFinite(xt) && xt > t
+      })
+      if (at < 0) at = out.length
+    }
+    out.splice(at, 0, c)
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------
