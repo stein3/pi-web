@@ -185,6 +185,16 @@ const EDIT_DIFF = ' 1 line1\n 2 line2\n-3 file contents\n+3 file contents v2\n 4
 const EDIT_ARGS = { path: '/tmp/x.txt', edits: [{ oldText: 'file contents', newText: 'file contents v2' }] }
 const EDIT_JSON = JSON.stringify(EDIT_ARGS)
 
+// A tool name the bridge has never heard of, scripted ONLY when a check asks
+// for it (FAKE_PI_EXTRA_TOOL=<name>). The webui draws an output box for every
+// tool part, so "the result text survives for an unknown name" is a contract,
+// not an accident. Off by default: other checks pin this turn's exact part and
+// frame counts.
+const EXTRA_TOOL = process.env.FAKE_PI_EXTRA_TOOL || ''
+const EXTRA_ARGS_JSON = '{"action":"search","query":"token cost"}'
+const EXTRA_TEXT = '#11 [fact/demo] (1.42) first matched line\n#12 [rule/demo] (1.10) second matched line'
+const EXTRA_RESULT = { content: [{ type: 'text', text: EXTRA_TEXT }] }
+
 let running = false
 let aborted = false
 let followMode = 'one-at-a-time'
@@ -250,6 +260,7 @@ async function emitAssistant(text) {
     { index: off + 2, id: 'call_2', name: 'read', args: '{"path":"/tmp/x.txt"}' },
     { index: off + 3, id: 'call_3', name: 'edit', args: EDIT_JSON },
   ]
+  if (EXTRA_TOOL) calls.push({ index: off + 4, id: 'call_extra', name: EXTRA_TOOL, args: EXTRA_ARGS_JSON })
   for (const c of calls) {
     out({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: c.index, id: c.id, toolName: c.name } })
     for (let i = 0; i < c.args.length; i += 9) {
@@ -275,6 +286,7 @@ async function emitAssistant(text) {
         { type: 'toolCall', id: 'call_1', name: 'bash', arguments: '{"command":"echo hi"}' },
         { type: 'toolCall', id: 'call_2', name: 'read', arguments: '{"path":"/tmp/x.txt"}' },
         { type: 'toolCall', id: 'call_3', name: 'edit', arguments: EDIT_JSON },
+        ...(EXTRA_TOOL ? [{ type: 'toolCall', id: 'call_extra', name: EXTRA_TOOL, arguments: EXTRA_ARGS_JSON }] : []),
       ],
       provider: 'testprov',
       model: 'fake-1',
@@ -289,6 +301,7 @@ async function runTools() {
   out({ type: 'tool_execution_start', toolCallId: 'call_1', toolName: 'bash', args: { command: 'echo hi' } })
   out({ type: 'tool_execution_start', toolCallId: 'call_2', toolName: 'read', args: { path: '/tmp/x.txt' } })
   out({ type: 'tool_execution_start', toolCallId: 'call_3', toolName: 'edit', args: EDIT_ARGS })
+  if (EXTRA_TOOL) out({ type: 'tool_execution_start', toolCallId: 'call_extra', toolName: EXTRA_TOOL, args: { action: 'search', query: 'token cost' } })
   await sleep(TOOL_MS)
   // pi's tool_execution_end hands over the WHOLE ToolResult object
   // ({ content, details }), not its content blocks.
@@ -306,6 +319,8 @@ async function runTools() {
     },
     isError: false,
   })
+  if (EXTRA_TOOL)
+    out({ type: 'tool_execution_end', toolCallId: 'call_extra', toolName: EXTRA_TOOL, result: EXTRA_RESULT, isError: false })
   // pi persists tool results as their own messages (END timestamp + runtime)
   // after the tools finish — the projection joins them back onto the tool
   // call for the per-tool window (`bash 5ms`, `read 3ms`).
@@ -318,6 +333,11 @@ async function runTools() {
   out({ type: 'message_end', message: tr2 })
   out({ type: 'message_start', message: tr3 })
   out({ type: 'message_end', message: tr3 })
+  if (EXTRA_TOOL) {
+    const trX = { role: 'toolResult', toolCallId: 'call_extra', toolName: EXTRA_TOOL, content: [{ type: 'text', text: EXTRA_TEXT }], isError: false, timestamp: ts(), durationMs: 4 }
+    out({ type: 'message_start', message: trX })
+    out({ type: 'message_end', message: trX })
+  }
 }
 
 async function bigWriteTurn(chunks) {
