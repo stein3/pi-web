@@ -18,6 +18,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { REPO, REPO_CWD, sessionSlug } from './harness.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const WEB = path.resolve(HERE, '..')
@@ -30,12 +31,11 @@ const AGENT = path.join(SCRATCH, 'pi-agent')
 // details.patch, which proves the projection against pi's own persisted shape.
 // That dir is gitignored private data, so a fresh clone falls back to a
 // synthesized session in the identical shape (see synthFixture) — the check must
-// never be un-runnable just because the operator's transcripts are absent.
-const FIXTURE_SRC = process.env.DIFF_FIXTURE || path.join(
-  WEB,
-  '..',
-  'config/pi-agent/sessions/--workspace-pi-local--',
-)
+// never be un-runnable just because the operator's transcripts are absent. The
+// slug is DERIVED from the workspace path (harness `sessionSlug`), so it follows
+// a checkout move or rename; override with DIFF_FIXTURE=<session dir>.
+const FIXTURE_SRC =
+  process.env.DIFF_FIXTURE || path.join(REPO, 'config/pi-agent/sessions', sessionSlug(REPO_CWD))
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failed = 0
