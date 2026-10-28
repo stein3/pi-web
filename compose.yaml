@@ -1,6 +1,6 @@
 services:
   pi-web:
-    image: pi-local:latest
+    image: pi-web:latest
     build: .
     container_name: pi-web
     restart: unless-stopped
@@ -35,3 +35,5 @@ services:
 
 volumes:
   pi-home:
+    name: pi-home
+    external: true
