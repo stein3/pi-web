@@ -103,17 +103,23 @@ this file is what matters when you edit the bridge.
   tau's `isStreaming`, so anything calling a session busy — that endpoint, the
   idle reaper — must OR in the bridge's `entry.compacting`.
 - **A compaction row is typed, and its failure has nowhere else to live.**
-  `compactionRow` emits `part.type:'compaction'` with the numbers in `state`
-  (`tokensBefore`/`tokensAfter`/`firstKeptEntryId`) plus an **interim** text part
-  (head line + summary) so a webui that has no branch for the type still renders
-  a full row — when the box lands it must IGNORE text parts on that row and the
-  interim part comes out. pi writes NO JSONL entry for a failed or cancelled
-  compaction, so `entry.compaction` (`state`, `reason`, `at`) in the status map
-  is the only place the outcome survives at all; pi's `session_compact_failed`
-  is an extension-runner hook (`agent-session.js:663`) and never reaches the RPC
-  stream. One canonical reason string — pi's `compaction_end.errorMessage` —
-  must be quoted identically by the `/summarize` body, the `session.error` tile
-  and the status map, or the toast/tile/box disagree about one event.
+  `compactionRow` emits exactly ONE part — `type:'compaction'`, `text` = pi's raw
+  summary (never a formatted head line: the component owns wording), numbers in
+  `state` (`tokensBefore`/`tokensAfter`/`firstKeptEntryId`, camelCase, because
+  that is what pi's own `CompactionEntry` and the webui's compaction code use).
+  Adding a second text part would draw the summary twice: the webui's `partsOf()`
+  drops text parts on a row that has a compaction part, and its message filter
+  must list `'compaction'` or the row vanishes (that filter is mirrored in
+  `webui-client.mjs` — change both). A webui build with no branch draws nothing
+  for the type; the bridge and the dist deploy together, so that window is a
+  build step, not a shipped state. pi writes NO JSONL entry for a failed or
+  cancelled compaction, so `entry.compaction` (`state`, `reason`, `at`) in the
+  status map is the only place the outcome survives at all; pi's
+  `session_compact_failed` is an extension-runner hook (`agent-session.js:663`)
+  and never reaches the RPC stream. One canonical reason string — pi's
+  `compaction_end.errorMessage` — must be quoted identically by the `/summarize`
+  body, the `session.error` tile and the status map, or the toast/tile/box
+  disagree about one event.
 - **Engine telemetry rides BOTH surfaces, and refuses to guess.** The probe
   (`/status` 1 Hz, `/metrics` only while the engine says it is busy — `live` is a
   field inside a 13.9 KB `/metrics`; there is no `/metrics.live`) caches into
@@ -122,7 +128,10 @@ this file is what matters when you edit the bridge.
   engine slot + `projection:null` means the engine cannot say which session made
   what, so with >1 generating session the frame is `{ambiguous:true}` with no
   numbers; no engine (cloud, parked, wedged) ⇒ `source:'derived'` from pi's own
-  deltas, and it never invents `prompt_total`. Park after `ENGINE_FAIL_LIMIT`
+  deltas, and it never invents `prompt_total`. **Every** generating session gets a
+  frame: a session whose provider resolves to no `baseUrl` must fall through to
+  the derived shape too — grouping only sessions that have an engine left the box
+  with nothing to draw (`box-check` caught that). Park after `ENGINE_FAIL_LIMIT`
   consecutive failures and poll ZERO while nothing is busy — that engine is the
   agent's own model.
 - **SSE volume.** Do not mirror every pi event as `session.updated`: one
@@ -151,12 +160,14 @@ Every check is self-contained: it seeds fixtures, spawns `pi-web` against
 on gitignored data (real transcripts, `config/pi-agent/`) — seed a fixture, or
 prefer one when it happens to exist. `PI_WEB_JS=` / `PI_WEB_SCRIPT=` point the
 same assertions at another build: prove the check **fails** on the pre-fix build
-before believing that it passes. `queue-check`, `ws-check`, `ui-check` and
-`time-check` need a live server / chromium / the sibling checkout and exit **2**
-with a SKIP message when it is missing — never a silent pass. `node
+before believing that it passes. `queue-check`, `ws-check`, `ui-check`,
+`time-check` and `box-check` need a live server / chromium / the sibling checkout
+and exit **2** with a SKIP message when it is missing — never a silent pass. `node
 .testbin/optional.mjs <check>` puts a SKIP-able check in the `&&` chain without
 faking a pass (0 pass / 2 SKIP / anything else fails); `client-check` — the real
-webui client, needs `WEBUI_SRC=` — runs that way. Ports come from `harness.mjs`
+webui client, needs `WEBUI_SRC=` — and `box-check` — chromium driving the built
+dist, the only check that asserts a **rendered** box — run that way. Ports come
+from `harness.mjs`
 (`CHECK_PORT` 8126 for the spawned bridge, `ENGINE_PORT` 8127 for a fixture
 server such as `fake-engine.mjs`); two checks sharing one pair back-to-back in a
 single shell can flake on the previous teardown, so never run them concurrently.

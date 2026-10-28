@@ -236,12 +236,17 @@ async function caseLive() {
     textOf(rows[0] ?? {}).includes(SUMMARY_TEXT) && !(cp?.text ?? '').includes('Context compacted'),
     'the typed part holds pi\'s RAW summary — the head line belongs to the component',
   )
-  // The interim part keeps the CURRENT renderer (text/reasoning/tool/file only,
-  // Transcript.svelte:116) drawing a full row, so the bridge can land before M3
-  // without the transcript going blank. M3 ignores it, and this check flips.
+  // The interim text part is gone (M3 landed): the webui's compaction box draws
+  // the row from the typed part, so a second copy would render twice.
   check(
-    ui.renders(rows[0] ?? {}) && (rows[0]?.parts ?? []).some((p) => p.type === 'text' && p.text?.includes('Context compacted')),
-    'an interim text part means the CURRENT webui still renders the row (bridge lands first, no blank window)',
+    (rows[0]?.parts ?? []).every((p) => p.type !== 'text') && (cp?.text ?? '').includes(SUMMARY_TEXT),
+    'no plain text part on the row — pi\'s summary rides the typed part only, which is what the box renders',
+  )
+  check(
+    ui.renders(rows[0] ?? {}) &&
+      typeof cp?.state?.tokensBefore === 'number' &&
+      typeof cp?.state?.tokensAfter === 'number',
+    `the row is renderable and carries the box's counts (${JSON.stringify(Object.keys(cp?.state ?? {}))})`,
   )
   check(
     (post?.messages ?? []).indexOf(rows[0]) === (post?.messages?.length ?? 0) - 1,
@@ -338,10 +343,9 @@ async function caseCold() {
   tabs.open({ id: uuid, title: info?.title || uuid.slice(0, 14), messages: [], live: true, ...(info?.cwd ? { cwd: info.cwd } : {}) })
   sse.applyMessages(uuid, msgs, true)
   const tab = tabs.snapshot(uuid)
-  // The row is IN the real store with its typed part intact; the CURRENT
-  // renderer's part filter (Transcript.svelte:116 = text/reasoning/tool/file)
-  // does not know 'compaction' yet, so it draws nothing. That gap is exactly
-  // what M3 closes — assert both halves instead of pretending it renders.
+  // The row is IN the real store with its typed part intact, and the webui's
+  // compaction branch (M3) draws it — so the store must hold the numbers the box
+  // reads and nothing that would make it draw the summary twice.
   const stored = tab.messages.filter((m) => textOf(m).includes(SUMMARY_TEXT))
   check(stored.length === 1, `the summary row is in the real tab store, once (${stored.length})`)
   check(
@@ -353,9 +357,14 @@ async function caseCold() {
     'it is not mistaken for a subagent notice',
   )
   const drawn = tab.messages.filter(ui.renders)
+  const drawnParts = ui.partsOf(stored[0] ?? {})
   check(
-    drawn.filter((m) => textOf(m).includes(SUMMARY_TEXT)).length === 1,
-    `the CURRENT renderer draws it exactly once, off the interim part (${drawn.length} drawn rows)`,
+    drawn.filter((m) => (m.parts ?? []).some((p) => p.type === 'compaction' && String(p.text ?? '').includes(SUMMARY_TEXT))).length === 1,
+    `the box's row is drawn EXACTLY ONCE (${drawn.length} drawn rows)`,
+  )
+  check(
+    drawnParts.length === 1 && drawnParts[0]?.type === 'compaction' && String(drawnParts[0]?.text ?? '').includes(SUMMARY_TEXT),
+    `and it draws ONE part — the typed one, with pi's summary in it (${JSON.stringify(drawnParts.map((p) => p.type))})`,
   )
 }
 

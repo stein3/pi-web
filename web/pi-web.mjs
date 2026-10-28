@@ -696,9 +696,8 @@ function compactionRow(entry) {
   const created = Date.parse(entry.timestamp ?? '') || 0
   const before = Number(entry.tokensBefore)
   const after = Number(entry.estimatedTokensAfter)
-  // The interim part's human line (see parts[1]); the typed part carries no
-  // prose so a component can own the wording.
-  const head = `⟳ Context compacted${Number.isFinite(before) ? ` — ${before.toLocaleString('en-US')} tokens summarised` : ''}`
+  // The head line (counts + label) belongs to the component, so nothing here
+  // formats prose: `summary` rides raw and `state` carries the numbers.
   const summary = String(entry.summary ?? '').trim()
   return {
     id: mid,
@@ -719,9 +718,12 @@ function compactionRow(entry) {
     // whitelists part keys — type/text/state/synthetic survive, ROW-level keys
     // are dropped — so `type` + `state` are the only marker that reaches a
     // component. The head line is deliberately NOT invented into `text`: pi's
-    // summary lands raw and the component owns the wording. (Until the webui
-    // grows the branch, Transcript.svelte:116 renders nothing for this type —
-    // the accepted bridge-first window.)
+    // summary lands raw and the component owns the wording (M3's
+    // `details.cmpbox` in Transcript.svelte builds it from `state`).
+    // There is deliberately NO second text part: the box renders this one, so a
+    // copy would be drawn twice. A webui build without the branch renders nothing
+    // for the type — the bridge and the dist are deployed together (pi-web serves
+    // the sibling checkout's `dist`), and both are rebuilt in one step.
     parts: [
       {
         id: `${mid}:0`,
@@ -735,20 +737,6 @@ function compactionRow(entry) {
           ...(Number.isFinite(after) ? { tokensAfter: after } : {}),
           ...(entry.firstKeptEntryId ? { firstKeptEntryId: String(entry.firstKeptEntryId) } : {}),
         },
-      },
-      // INTERIM part, for a webui that has no 'compaction' branch: its part
-      // filter (Transcript.svelte:116) is text/reasoning/tool/file, so without
-      // this the row renders BLANK. It carries the human head line + the summary
-      // — i.e. exactly what this row looked like before the typed part existed.
-      // When the box lands (M3) it must IGNORE text parts on a message that has
-      // a compaction part, and this part comes out of the bridge.
-      {
-        id: `${mid}:1`,
-        type: 'text',
-        text: summary
-          ? `**${head}**\n\n${summary}`
-          : `**${head}**`,
-        synthetic: true,
       },
     ],
   }
@@ -2554,7 +2542,7 @@ function derivedShape(e) {
 
 async function engineTick() {
   const groups = busyByEngineBase()
-  const generating = new Set()
+  const publish = []
   for (const [base, ids] of groups) {
     const st = await engineSample(base)
     const shape =
@@ -2573,16 +2561,28 @@ async function engineTick() {
         : st.status
           ? engineShape(st)
           : derivedShape(live.get(ids[0]))
-    for (const id of ids) {
-      const e = live.get(id)
-      if (!e) continue
-      generating.add(id)
-      e.engine = shape
-      const key = JSON.stringify(shape)
-      if (e.engineSent === key) continue // one frame per change, not one per tick
-      e.engineSent = key
-      emitFor(id, 'session.status', { sessionID: id, status: { type: 'engine', ...shape } })
-    }
+    for (const id of ids) publish.push([id, shape])
+  }
+  // A session whose provider resolves to NO engine (a cloud provider, or a store
+  // with no baseUrl) still deserves the box: phase and rate come from pi's own
+  // event stream. It is labelled `source:'derived'` and never invents a prefill
+  // total, so the UI can render it as approximate — or drop it.
+  for (const s of liveManager.sessions.values()) {
+    const e = live.get(s.id)
+    if (!s.isStreaming && !e?.compacting) continue
+    if (engineBaseFor(s)) continue
+    publish.push([s.id, derivedShape(e)])
+  }
+  const generating = new Set()
+  for (const [id, shape] of publish) {
+    const e = live.get(id)
+    if (!e) continue
+    generating.add(id)
+    e.engine = shape
+    const key = JSON.stringify(shape)
+    if (e.engineSent === key) continue // one frame per change, not one per tick
+    e.engineSent = key
+    emitFor(id, 'session.status', { sessionID: id, status: { type: 'engine', ...shape } })
   }
   // A parked engine wakes on the next busy transition; anything no longer
   // generating drops its block, because the webui re-derives live state from the

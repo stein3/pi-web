@@ -234,8 +234,14 @@ export const ui = {
   renders(m) {
     return (
       !!m.error ||
-      (m.parts ?? []).some((p) => ['text', 'tool', 'reasoning', 'file'].includes(p.type))
+      (m.parts ?? []).some((p) => ['text', 'tool', 'reasoning', 'file', 'compaction'].includes(p.type))
     )
+  },
+  /** Transcript.svelte `partsOf(m)` — a compaction row drops its text parts */
+  partsOf(m) {
+    const ps = m?.parts ?? []
+    if (ps.some((p) => p?.type === 'compaction')) return ps.filter((p) => p?.type !== 'text')
+    return ps
   },
   /** Transcript.svelte `{:else if p.type === 'reasoning' && (p.text ?? '').trim()}` */
   thinkingBlock(p) {

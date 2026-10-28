@@ -270,11 +270,16 @@ async function caseOk() {
       !(cp?.text ?? '').includes('Context compacted'),
       `the TYPED part holds pi's RAW summary — the head line is the component's job (${JSON.stringify((cp?.text ?? '').slice(0, 40))})`,
     )
-    // The interim contract: a webui with no 'compaction' branch must still draw
-    // this row, so a plain text part rides alongside the typed one.
+    // The final contract (M3 landed): the row carries NO plain text part — the
+    // webui's compaction box renders pi's summary from the typed part, so a
+    // second copy would be drawn twice.
     check(
-      !!legacy && legacy.text.includes('Context compacted') && legacy.text.includes('compact-check fixture'),
-      `an interim text part keeps the CURRENT webui rendering a full row (${JSON.stringify((legacy?.text ?? '').slice(0, 46))})`,
+      legacy === undefined,
+      `the row carries NO plain text part — pi's summary rides the typed part only (${JSON.stringify((legacy?.text ?? '').slice(0, 46))})`,
+    )
+    check(
+      (cp?.text ?? '').includes('compact-check fixture'),
+      `and the typed part carries it verbatim (${JSON.stringify((cp?.text ?? '').slice(0, 46))})`,
     )
     check(
       (sum?.parts ?? []).length > 0 && (sum?.parts ?? []).every((p) => p.synthetic === true),
