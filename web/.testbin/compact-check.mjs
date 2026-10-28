@@ -249,14 +249,36 @@ async function caseOk() {
     )
     const sum = rows.at(-1)
     check(sum?.id?.startsWith('cmp_'), `summary row has the deterministic compaction id (${sum?.id})`)
-    const sumText = (sum?.parts ?? []).map((p) => p.text ?? '').join('')
+    // The row is TYPED, not a faked assistant message with a header in its text:
+    // a component needs a part type to put a box around, and the numbers
+    // (tokens, kept-entry) must arrive structured. `normalizeMessages` (webui
+    // sse.ts:219) whitelists part keys — type/text/state/synthetic survive,
+    // row-level keys do NOT — so `state` is the carrier.
+    const cp = (sum?.parts ?? []).find((p) => p.type === 'compaction')
+    check(!!cp, `the row carries a part of type 'compaction' (${JSON.stringify((sum?.parts ?? []).map((p) => p.type))})`)
     check(
-      sum?.role === 'assistant' && sumText.includes('Context compacted') && sumText.includes('compact-check fixture'),
-      `the row carries pi's summary text + header (${JSON.stringify(sumText.slice(0, 60))})`,
+      cp?.state?.status === 'ok' && Number(cp?.state?.tokensBefore) > 0 && !!cp?.state?.firstKeptEntryId,
+      `state carries the outcome structured (${JSON.stringify(cp?.state)})`,
+    )
+    const sumText = (sum?.parts ?? []).map((p) => p.text ?? '').join('')
+    const legacy = (sum?.parts ?? []).find((p) => p.type === 'text')
+    check(
+      sum?.role === 'assistant' && sumText.includes('compact-check fixture'),
+      `the row carries pi's summary text (${JSON.stringify(sumText.slice(0, 60))})`,
+    )
+    check(
+      !(cp?.text ?? '').includes('Context compacted'),
+      `the TYPED part holds pi's RAW summary — the head line is the component's job (${JSON.stringify((cp?.text ?? '').slice(0, 40))})`,
+    )
+    // The interim contract: a webui with no 'compaction' branch must still draw
+    // this row, so a plain text part rides alongside the typed one.
+    check(
+      !!legacy && legacy.text.includes('Context compacted') && legacy.text.includes('compact-check fixture'),
+      `an interim text part keeps the CURRENT webui rendering a full row (${JSON.stringify((legacy?.text ?? '').slice(0, 46))})`,
     )
     check(
       (sum?.parts ?? []).length > 0 && (sum?.parts ?? []).every((p) => p.synthetic === true),
-      'the row is marked synthetic (no revert/fork affordance on generated text)',
+      'every part of the row is synthetic (no revert/fork affordance on generated text)',
     )
     check(
       seen('session.compacted').length >= 1,
@@ -539,7 +561,88 @@ async function caseStatusDuringCompaction() {
   }
 }
 
-for (const c of [caseOk, caseFailFast, caseSlow, caseSlowFail, caseAbort, caseSendDuringCompaction, caseSendPastWindow, caseStatusDuringCompaction]) {
+// The webui's authoritative busy input (sse.ts catchUp): GET /session/status.
+async function statusMap() {
+  const r = await req('/oc/session/status')
+  return r.json || {}
+}
+
+// The compaction CONTRACT the box (M2/M3/M4) renders from: a hydratable state
+// for every phase, and ONE sentence for a failure shared by every surface.
+async function caseCompactionState() {
+  // Summary long enough to query the status map WHILE it runs.
+  const b = await boot({ FAKE_PI_COMPACT: 'slow', FAKE_PI_COMPACT_MS: '2500' })
+  process.env.__SCRATCH = b.SCRATCH
+  try {
+    const sid = await newSession('compact-state')
+    const inflight = summarize(sid)
+    await sleep(600)
+    const live = (await statusMap())[sid]
+    check(live?.compaction?.state === 'running', `status says compaction RUNNING mid-summary (${JSON.stringify(live)})`)
+    await inflight
+    await sleep(300)
+    const done = (await statusMap())[sid]
+    check(done?.compaction?.state === 'ok', `status records the compaction OK afterwards (${JSON.stringify(done)})`)
+    check(!done?.compaction?.reason, `no reason on a success (${JSON.stringify(done?.compaction)})`)
+  } finally {
+    b.stop()
+    await sleep(250)
+    fs.rmSync(b.SCRATCH, { recursive: true, force: true })
+    if (failed) console.log('--- server log ---\n' + b.log.slice(-1500))
+  }
+}
+
+// pi's compact() catch emits compaction_end errorMessage="Compaction failed:
+// …" AND throws, so one failure reaches the client twice (the open POST and
+// SSE). Both must say the SAME sentence, and so must the status map — or the
+// toast, the error tile and the box disagree about what happened.
+async function caseCompactionReasonFast() {
+  const b = await boot({ FAKE_PI_COMPACT: 'fail' })
+  process.env.__SCRATCH = b.SCRATCH
+  try {
+    const sid = await newSession('compact-reason-fast')
+    const r = await summarize(sid)
+    const body = String(r.json?.data?.message ?? '')
+    const st = (await statusMap())[sid]
+    check(st?.compaction?.state === 'failed', `status records the FAILURE as state (${JSON.stringify(st?.compaction)})`)
+    check(
+      !!st?.compaction?.reason && body === st.compaction.reason,
+      `HTTP body and status carry the IDENTICAL sentence (${JSON.stringify(body)} vs ${JSON.stringify(st?.compaction?.reason)})`,
+    )
+  } finally {
+    b.stop()
+    await sleep(250)
+    fs.rmSync(b.SCRATCH, { recursive: true, force: true })
+    if (failed) console.log('--- server log ---\n' + b.log.slice(-1500))
+  }
+}
+
+// The late case: the POST already answered "started", so SSE is the only
+// surface left — and the tile sentence must match the state sentence.
+async function caseCompactionReasonLate() {
+  const b = await boot({ FAKE_PI_COMPACT: 'slowfail', FAKE_PI_COMPACT_MS: '900', PI_WEB_SUMMARIZE_WAIT_MS: '200' })
+  process.env.__SCRATCH = b.SCRATCH
+  try {
+    const sid = await newSession('compact-reason-late')
+    await summarize(sid)
+    for (let i = 0; i < 40 && !seen('session.error').length; i++) await sleep(150)
+    const tile = String(seen('session.error')[0]?.properties?.error?.data?.message ?? '')
+    const st = (await statusMap())[sid]
+    check(!!tile, 'the late failure surfaced as a tile')
+    check(st?.compaction?.state === 'failed', `status records the late failure (${JSON.stringify(st?.compaction)})`)
+    check(
+      !!st?.compaction?.reason && tile === st.compaction.reason,
+      `tile and status agree (${JSON.stringify(tile)} vs ${JSON.stringify(st?.compaction?.reason)})`,
+    )
+  } finally {
+    b.stop()
+    await sleep(250)
+    fs.rmSync(b.SCRATCH, { recursive: true, force: true })
+    if (failed) console.log('--- server log ---\n' + b.log.slice(-1500))
+  }
+}
+
+for (const c of [caseOk, caseFailFast, caseSlow, caseSlowFail, caseAbort, caseSendDuringCompaction, caseSendPastWindow, caseStatusDuringCompaction, caseCompactionState, caseCompactionReasonFast, caseCompactionReasonLate]) {
   console.log(`\n===== ${c.name} =====`)
   try {
     await c()

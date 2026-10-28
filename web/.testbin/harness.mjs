@@ -34,6 +34,16 @@ export function sessionSlug(cwd) {
 }
 
 /**
+ * Ports the checks bind. Convention: the spawned pi-web on CHECK_PORT and any
+ * second fixture server (the fake engine) on ENGINE_PORT — always the 8126/8127
+ * pair, never a hand-picked port. Two checks run back-to-back in ONE shell on
+ * the same pair can flake on the previous child's teardown, so give each
+ * concurrent run its own pair instead of sharing.
+ */
+export const CHECK_PORT = Number(process.env.CHECK_PORT || 8126)
+export const ENGINE_PORT = Number(process.env.ENGINE_PORT || 8127)
+
+/**
  * The nopencode checkout's e2e helpers (launchBrowser / BASE / sleep / poll).
  * Default: the sibling clone, i.e. `cd .. && git clone ... nopencode opencode`.
  * Override with E2E_HELPERS=<path to e2e/helpers/setup.mjs>.

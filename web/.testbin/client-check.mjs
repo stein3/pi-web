@@ -220,9 +220,28 @@ async function caseLive() {
   )
   check(rows[0]?.id?.startsWith('cmp_'), `it is a compaction row (${rows[0]?.id})`)
   check(rows[0]?.role === 'assistant', `attributed to the role that generated it (${rows[0]?.role})`)
+  // The typed part must survive the REAL normalizeMessages (sse.ts:219 whitelists
+  // part keys; row-level keys like `compacted` are dropped, which is why the
+  // marker lives on the part) — that is the whole contract the box renders from.
+  const cp = (rows[0]?.parts ?? []).find((p) => p.type === 'compaction')
   check(
-    ui.renders(rows[0] ?? {}) && textOf(rows[0] ?? {}).includes('Context compacted'),
-    'it renders and says what it is (header + tokens summarised)',
+    !!cp,
+    `a part typed 'compaction' survives normalizeMessages (${JSON.stringify((rows[0]?.parts ?? []).map((p) => p.type))})`,
+  )
+  check(
+    cp?.state?.status === 'ok' && Number(cp?.state?.tokensBefore) > 0 && !!cp?.state?.firstKeptEntryId,
+    `with the outcome structured in state (${JSON.stringify(cp?.state)})`,
+  )
+  check(
+    textOf(rows[0] ?? {}).includes(SUMMARY_TEXT) && !(cp?.text ?? '').includes('Context compacted'),
+    'the typed part holds pi\'s RAW summary — the head line belongs to the component',
+  )
+  // The interim part keeps the CURRENT renderer (text/reasoning/tool/file only,
+  // Transcript.svelte:116) drawing a full row, so the bridge can land before M3
+  // without the transcript going blank. M3 ignores it, and this check flips.
+  check(
+    ui.renders(rows[0] ?? {}) && (rows[0]?.parts ?? []).some((p) => p.type === 'text' && p.text?.includes('Context compacted')),
+    'an interim text part means the CURRENT webui still renders the row (bridge lands first, no blank window)',
   )
   check(
     (post?.messages ?? []).indexOf(rows[0]) === (post?.messages?.length ?? 0) - 1,
@@ -299,9 +318,11 @@ async function caseCold() {
   check(Array.isArray(msgs) && msgs.length === 4, `cold session reads back (${msgs?.length} rows)`)
   const idx = (msgs ?? []).findIndex((m) => textOf(m).includes(SUMMARY_TEXT))
   check(idx > 0, 'the compaction entry became transcript content')
+  // The tokens it replaced are STRUCTURED state, not prose in the header: the
+  // component formats the head line, so the number has to survive as a number.
   check(
-    (msgs ?? [])[idx]?.parts?.[0]?.text?.includes('119,802'),
-    `it reports the tokens it replaced (${JSON.stringify(msgs?.[idx]?.parts?.[0]?.text?.slice(0, 70))})`,
+    msgs?.[idx]?.parts?.[0]?.type === 'compaction' && Number(msgs[idx].parts[0].state?.tokensBefore) === 119802,
+    `it reports the tokens it replaced as state (${JSON.stringify(msgs?.[idx]?.parts?.[0]?.state)})`,
   )
   check(idx < msgs.length - 1, 'it lands in entry order, mid-conversation (not glued to the end)')
   const reasoning = (msgs ?? []).flatMap((m) => m.parts ?? []).filter(ui.thinkingBlock)
@@ -317,15 +338,24 @@ async function caseCold() {
   tabs.open({ id: uuid, title: info?.title || uuid.slice(0, 14), messages: [], live: true, ...(info?.cwd ? { cwd: info.cwd } : {}) })
   sse.applyMessages(uuid, msgs, true)
   const tab = tabs.snapshot(uuid)
-  const drawn = tab.messages.filter(ui.renders)
-  check(drawn.some((m) => textOf(m).includes(SUMMARY_TEXT)), 'the summary is on screen in the real tab store')
+  // The row is IN the real store with its typed part intact; the CURRENT
+  // renderer's part filter (Transcript.svelte:116 = text/reasoning/tool/file)
+  // does not know 'compaction' yet, so it draws nothing. That gap is exactly
+  // what M3 closes — assert both halves instead of pretending it renders.
+  const stored = tab.messages.filter((m) => textOf(m).includes(SUMMARY_TEXT))
+  check(stored.length === 1, `the summary row is in the real tab store, once (${stored.length})`)
   check(
-    !util.taskNoticeOf(drawn.find((m) => textOf(m).includes(SUMMARY_TEXT))),
-    'it is not mistaken for a subagent notice',
+    !!stored[0] && (stored[0].parts ?? []).some((p) => p.type === 'compaction' && p.state?.status === 'ok'),
+    'with its typed part + state intact after the real normalizeMessages',
   )
   check(
+    !util.taskNoticeOf(stored[0]),
+    'it is not mistaken for a subagent notice',
+  )
+  const drawn = tab.messages.filter(ui.renders)
+  check(
     drawn.filter((m) => textOf(m).includes(SUMMARY_TEXT)).length === 1,
-    'and only once',
+    `the CURRENT renderer draws it exactly once, off the interim part (${drawn.length} drawn rows)`,
   )
 }
 
