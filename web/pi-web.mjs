@@ -608,7 +608,7 @@ function forkTranscript(file, keepEntries, name) {
     version: 3,
     id,
     timestamp: stamp,
-    cwd: srcHeader.cwd ?? PI_CWD,
+    cwd: liveCwd(srcHeader.cwd) || PI_CWD,
     parentSession: path.resolve(file),
   }
   const fd = fs.openSync(dest, 'wx') // never clobber
@@ -1883,7 +1883,7 @@ function readSessionMeta(file, st) {
   }
   return {
     file,
-    cwd: header.cwd || undefined,
+    cwd: liveCwd(header.cwd) || PI_CWD,
     title: info?.name || deriveTitle(entries) || header.id.slice(0, 12),
     created: Date.parse(header.timestamp) || st.mtimeMs,
     updated: st.mtimeMs,
@@ -2045,9 +2045,16 @@ async function sessionFor(id) {
     return owned
   }
   const entries = leafChain(readJsonl(file))
+  const hdrCwd = readHeaderCwd(file)
+  const runCwd = liveCwd(hdrCwd) || PI_CWD
+  if (hdrCwd && hdrCwd !== runCwd) {
+    // say it out loud: the workspace was renamed/moved, and the child will not be
+    // where the transcript says it was (the sidebar must not claim a dead path)
+    console.log(`[resume] ${path.basename(file)}: header cwd ${JSON.stringify(hdrCwd)} is gone -> running in ${runCwd}`)
+  }
   const s = await liveManager.resume({
     sessionFile: file,
-    cwd: readHeaderCwd(file) ?? PI_CWD,
+    cwd: runCwd,
     entries,
     sessionName: deriveTitle(entries) || null,
   })
@@ -3310,6 +3317,32 @@ function expandHome(p) {
 function readHeaderCwd(file) {
   for (const e of readJsonl(file)) if (e.type === 'session') return e.cwd || null
   return null
+}
+
+/**
+ * A transcript's header cwd is a snapshot of the workspace as it was when the
+ * session STARTED, and workspaces get renamed and moved (a repo dir rename is
+ * enough). pi will not run in a directory that is gone: tau throws
+ * `Directory not found: <cwd>` (pi-tau-web-server/bin/sessions.js:168) BEFORE it
+ * spawns, so every route through `sessionFor` rejects — the session stops being
+ * readable, let alone sendable — while the sidebar keeps advertising a workspace
+ * that does not exist. So a header cwd is honoured only if it is still a
+ * directory; otherwise fall back to its nearest existing ANCESTOR (the repo moved,
+ * its parent did not) and finally to PI_CWD. Never the filesystem root: a
+ * transcript carried in from another machine must not put a pi child in `/`.
+ */
+function liveCwd(p) {
+  if (!p) return ''
+  let cur = path.resolve(expandHome(String(p)))
+  for (;;) {
+    if (cur === path.parse(cur).root) return ''
+    try {
+      if (fs.statSync(cur).isDirectory()) return cur
+    } catch {}
+    const up = path.dirname(cur)
+    if (up === cur) return ''
+    cur = up
+  }
 }
 
 function seedDup(entries, e) {

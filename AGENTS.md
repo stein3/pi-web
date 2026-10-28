@@ -27,6 +27,17 @@ this file is what matters when you edit the bridge.
   `<agentDir>/sessions-trash` — outside every directory `listFiles()` walks — and
   resolve that file *before* closing the child. Closing the child only makes the
   row reappear.
+- **A transcript's cwd is a snapshot; a renamed workspace must not kill the
+  session.** pi's header pins the cwd from the moment the session started, and tau
+  throws `Directory not found: <cwd>` (sessions.js:168) BEFORE it spawns — so one
+  repo dir rename makes every route through `sessionFor` reject (a 500 on history
+  AND on prompt) while the sidebar advertises a workspace that no longer exists.
+  Never hand a header cwd to `resume`, and never put one in a row or in a fork
+  header: `liveCwd()` keeps it only if it is still a directory, else falls back to
+  the nearest existing **ancestor**, then `PI_CWD`, and never to `/` (a transcript
+  carried in from another machine must not put a pi child in the root). Never
+  rewrite the header — the fallback is a runtime decision, logged once per resume.
+  `web/.testbin/cwd-check.mjs` holds it (9 assertions red before the fix).
 - **Tool metadata.** The transcript's inline diff comes from
   `state.metadata.filediff.patch`, and the webui shallow-merges parts — so every
   later frame for a tool part must re-supply it. Copy the patch **only**:
