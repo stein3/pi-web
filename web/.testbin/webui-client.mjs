@@ -106,6 +106,12 @@ function installShims(BASE) {
       this.readyState = 1
       const u = new URL(url, BASE)
       const req = http.get(u, (res) => {
+        // A browser fires `onopen` when the stream is established, and sse.ts
+        // leans on it: `if (esEverConnected) void catchUp()` — the ONE path that
+        // reconciles busy/compacting against GET /session/status. A shim that
+        // never fires it cannot see (or fix) a bug in that reconcile.
+        this.readyState = 1
+        this.onopen?.()
         let buf = ''
         res.on('data', (c) => {
           buf += c
@@ -122,19 +128,59 @@ function installShims(BASE) {
             }
           }
         })
-        res.on('end', () => {
+        const dropped = () => {
+          if (this.readyState === 2) return
           this.readyState = 2
-        })
+          this.onerror?.()
+        }
+        res.on('end', dropped)
+        res.on('close', dropped)
       })
       req.on('error', () => {
-        this.readyState = 2
+        if (this.readyState !== 2) {
+          this.readyState = 2
+          this.onerror?.()
+        }
       })
+      this._req = req
     }
     close() {
       this.readyState = 2
     }
+    // Test hook: a mid-turn connection hiccup, exactly as the browser would
+    // deliver it (socket dies -> onerror -> sse.ts recreates with backoff ->
+    // onopen -> catchUp). Needed to exercise the reconcile on a schedule.
+    drop() {
+      this._req?.destroy()
+      if (this.readyState !== 2) {
+        this.readyState = 2
+        this.onerror?.()
+      }
+    }
   }
+  NodeEventSource.CONNECTING = 0
+  NodeEventSource.OPEN = 1
+  NodeEventSource.CLOSED = 2
   globalThis.EventSource = NodeEventSource
+  // The most recent stream, so a check can drop it (see dropStream()).
+  const orig = NodeEventSource
+  globalThis.__lastSse = null
+  globalThis.EventSource = function (url) {
+    const s = new orig(url)
+    globalThis.__lastSse = s
+    return s
+  }
+  globalThis.EventSource.CONNECTING = 0
+  globalThis.EventSource.OPEN = 1
+  globalThis.EventSource.CLOSED = 2
+}
+
+/** Drop the browser's live SSE connection (simulated network hiccup). */
+export function dropStream() {
+  const s = globalThis.__lastSse
+  if (!s) throw new Error('no EventSource open — call sse.startEvents() first')
+  s.drop()
+  return true
 }
 
 /**

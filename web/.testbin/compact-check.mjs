@@ -480,7 +480,66 @@ async function caseSendPastWindow() {
   }
 }
 
-for (const c of [caseOk, caseFailFast, caseSlow, caseSlowFail, caseAbort, caseSendDuringCompaction, caseSendPastWindow]) {
+// The webui does NOT trust SSE alone for `busy`: its reconcile watchdog
+// (webui/src/lib/sse.ts startEvents() → catchUp(), a 10s tick whenever any live
+// tab is busy) polls GET /oc/session/status and writes back whatever it reads —
+// `if (!busy && t.compacting) compacting = false`. pi's manual compact() emits
+// compaction_start/compaction_end and NO agent_start/turn_start (core/
+// agent-session.js `compact()`), and tau's `isStreaming` is only ever set by
+// those two (pi-tau-web-server src/server/sessions.ts), so a status map built
+// from `isStreaming` alone says `idle` for the whole summary. The watchdog then
+// cancels the "Compacting session…" strip ~10s into a summary that runs for
+// minutes on a big session. So the STATUS ENDPOINT is part of the compaction
+// contract, not just the SSE frames.
+async function caseStatusDuringCompaction() {
+  const b = await boot({ FAKE_PI_COMPACT: 'slow', FAKE_PI_COMPACT_MS: 3000 })
+  process.env.__SCRATCH = b.SCRATCH
+  try {
+    const sid = await newSession('compact-status')
+    check(!!sid, `live session created (${sid})`)
+    await req(`/oc/session/${sid}/prompt_async`, {
+      method: 'POST',
+      body: { parts: [{ type: 'text', text: 'fill the session first' }] },
+    })
+    for (let i = 0; i < 40 && !seen('session.idle').length; i++) await sleep(150)
+
+    const typeOf = async () => {
+      const st = await req('/oc/session/status')
+      const v = st.json?.[sid]
+      return v?.type ?? v?.state ?? `(no entry: ${JSON.stringify(st.json ?? '').slice(0, 60)})`
+    }
+
+    check((await typeOf()) === 'idle', `idle before the compaction (${await typeOf()})`)
+
+    const inflight = summarize(sid) // do NOT await: the window is the point
+    await sleep(400)
+    const mid1 = await typeOf()
+    check(mid1 === 'busy', `status says BUSY mid-summary (the watchdog's only input) — got ${mid1}`)
+    await sleep(900)
+    const mid2 = await typeOf()
+    check(mid2 === 'busy', `still busy 1.3s into the summary — got ${mid2}`)
+    check(
+      seen('session.next.compaction.ended').length === 0,
+      'and the summary really is still running (no compaction.ended yet)',
+    )
+
+    const r = await inflight
+    check(r.status === 200, `summarize answered (${r.status})`)
+    let after = await typeOf()
+    for (let i = 0; i < 40 && after !== 'idle'; i++) {
+      await sleep(150)
+      after = await typeOf()
+    }
+    check(after === 'idle', `status returns to idle once the summary lands — must not pin busy (${after})`)
+  } finally {
+    b.stop()
+    await sleep(250)
+    fs.rmSync(b.SCRATCH, { recursive: true, force: true })
+    if (failed) console.log('--- server log ---\n' + b.log.slice(-1500))
+  }
+}
+
+for (const c of [caseOk, caseFailFast, caseSlow, caseSlowFail, caseAbort, caseSendDuringCompaction, caseSendPastWindow, caseStatusDuringCompaction]) {
   console.log(`\n===== ${c.name} =====`)
   try {
     await c()

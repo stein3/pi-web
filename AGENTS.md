@@ -61,6 +61,11 @@ this file is what matters when you edit the bridge.
   `409 {name:"SessionBusyError"}` — pi never took the text, so the outcome is
   *known* and retryable, which is why it is not the `504 {unknown:true}` the
   prompt-timeout rule uses.
+- **`busy` is a projection, not just a stream.** The webui re-derives `busy` AND
+  `compacting` from `GET /session/status` (reconcile on every stream re-open + a
+  10s tick), so SSE frames alone don't hold them. A manual compact never sets
+  tau's `isStreaming`, so anything calling a session busy — that endpoint, the
+  idle reaper — must OR in the bridge's `entry.compacting`.
 - **SSE volume.** Do not mirror every pi event as `session.updated`: one
   coalesced frame per relevant metadata change, plus one at turn end. Deltas must
   rebuild the assistant text exactly, and a snapshot must equal the delta sum.
@@ -79,17 +84,20 @@ this file is what matters when you edit the bridge.
 ## Checks
 
 ```bash
-cd web && npm test    # diff 23 · delete 27 · compact 45 · hist 6 · title 19 · id 29 · tooltitle 39 · revert 24 · stream 32
+cd web && npm test
 ```
 
-All nine are self-contained: they seed fixtures, spawn `pi-web` against
+Every check is self-contained: it seeds fixtures, spawn `pi-web` against
 `web/.testbin/fake-pi.mjs`, and kill their own child. A check must never depend
 on gitignored data (real transcripts, `config/pi-agent/`) — seed a fixture, or
 prefer one when it happens to exist. `PI_WEB_JS=` / `PI_WEB_SCRIPT=` point the
 same assertions at another build: prove the check **fails** on the pre-fix build
 before believing that it passes. `queue-check`, `ws-check`, `ui-check` and
 `time-check` need a live server / chromium / the sibling checkout and exit **2**
-with a SKIP message when it is missing — never a silent pass.
+with a SKIP message when it is missing — never a silent pass. `node
+.testbin/optional.mjs <check>` puts a SKIP-able check in the `&&` chain without
+faking a pass (0 pass / 2 SKIP / anything else fails); `client-check` — the real
+webui client, needs `WEBUI_SRC=` — runs that way.
 
 - **Token fields.** The history projection emits two *different* numbers: `tokens`
   (newest-record context estimate, kept for InfoPanel/Footer) and

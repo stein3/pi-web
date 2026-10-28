@@ -23,6 +23,10 @@
  *      never replays it as a message, so it must reach the transcript as one
  *      row from the live event AND from the file, with a stable id so the
  *      refetch neither duplicates nor drops it.
+ *   D  the strip's LIFETIME — the client reconciles `busy`/`compacting` against
+ *      GET /session/status on every stream re-open (catchUp) and on a 10s
+ *      watchdog tick; a manual compaction must read busy there or the
+ *      "Compacting session…" strip is cancelled mid-summary.
  *
  * Self-contained: seeds its fixtures in a scratch dir, spawns pi-web on 8127
  * with the fake pi, and kills ONLY its own child by exact PID (SELF-KILL-GATE).
@@ -36,7 +40,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { REPO, WEB } from './harness.mjs'
-import { loadWebuiClient, ui, webuiSkip } from './webui-client.mjs'
+import { loadWebuiClient, ui, webuiSkip, dropStream } from './webui-client.mjs'
 
 const PORT = Number(process.env.CHECK_PORT || 8127)
 const BASE = `http://127.0.0.1:${PORT}`
@@ -87,7 +91,7 @@ async function boot(env = {}) {
   fs.mkdirSync(agentDir, { recursive: true })
   child = spawn(
     process.execPath,
-    [path.join(WEB, 'pi-web.mjs'), '--port', String(PORT), '--dir', agentDir, '--cwd', scratch],
+    [process.env.PI_WEB_SCRIPT || path.join(WEB, 'pi-web.mjs'), '--port', String(PORT), '--dir', agentDir, '--cwd', scratch],
     {
       cwd: WEB,
       env: {
@@ -325,6 +329,64 @@ async function caseCold() {
   )
 }
 
+// ===========================================================================
+// D: the strip's LIFETIME, not just its existence. The webui does NOT trust SSE
+// for `busy`: catchUp() — run on every stream RE-OPEN and on the 10s watchdog
+// tick while any live tab is busy — overwrites busy AND compacting with what
+// GET /oc/session/status reports. pi's manual compact() emits no agent_start/
+// turn_start, and tau sets `isStreaming` only from those, so a status map built
+// from `isStreaming` alone says `idle` for the whole summary and the reconcile
+// cancels the strip minutes into a summary the engine is still writing.
+// ===========================================================================
+async function caseStripSurvivesReconcile() {
+  const { tabs, oc } = client
+  const created = await j('/oc/session', { method: 'POST', body: { cwd: scratch, title: 'client-reconcile' } })
+  const sid = created.json?.id
+  check(!!sid, `live session created (${sid})`)
+  const info = await oc.session(sid)
+  tabs.open({ id: sid, title: info?.title || sid.slice(0, 14), messages: [], live: true })
+  await j(`/oc/session/${sid}/prompt_async`, { method: 'POST', body: { parts: [{ type: 'text', text: 'warm the session' }] } })
+  for (let i = 0; i < 100 && tabs.snapshot(sid)?.busy; i++) await sleep(100)
+
+  // long enough to outlive a reconcile, short enough to keep the suite honest
+  const inflight = j(`/oc/session/${sid}/summarize`, {
+    method: 'POST',
+    body: { providerID: 'testprov', modelID: 'fake-1', customInstructions: 'CHECK_COMPACT_MS=6000' },
+  })
+  for (let i = 0; i < 40 && !tabs.snapshot(sid)?.compacting; i++) await sleep(100)
+  check(tabs.snapshot(sid)?.compacting, 'the Compacting strip is up (SSE compaction.started)')
+  check(tabs.snapshot(sid)?.busy, 'and the tab is busy while the summary runs')
+
+  // The browser's own hiccup path: socket dies -> onerror -> sse.ts recreates
+  // (1s backoff) -> onopen -> catchUp() reconciles against the status map.
+  dropStream()
+  await sleep(1800)
+  const mid = tabs.snapshot(sid)
+  check(
+    mid?.compacting,
+    `the strip SURVIVES the busy-reconcile mid-summary (compacting=${mid?.compacting} busy=${mid?.busy})`,
+  )
+  check(mid?.busy, `and the tab stays busy (stop button / steer mode) — busy=${mid?.busy}`)
+
+  const r = await inflight
+  check(r.status === 200, `summarize answered (${r.status})`)
+  for (let i = 0; i < 80 && tabs.snapshot(sid)?.compacting; i++) await sleep(100)
+  await sleep(600)
+  const post = tabs.snapshot(sid)
+  check(
+    !post?.compacting && !post?.busy,
+    `the state clears when the summary lands — busy is not pinned (busy=${post?.busy} compacting=${post?.compacting})`,
+  )
+  check(
+    (post?.errors ?? []).length === 0,
+    `no error tile from the dropped stream or the compaction (${JSON.stringify(post?.errors ?? [])})`,
+  )
+  check(
+    (post?.messages ?? []).some((m) => textOf(m).includes(SUMMARY_TEXT)),
+    'the summary row still lands after the reconnect',
+  )
+}
+
 try {
   await boot()
   client = await loadWebuiClient(BASE)
@@ -335,7 +397,7 @@ try {
   process.exit(skip ? 2 : 1)
 }
 
-for (const c of [caseLive, caseCold]) {
+for (const c of [caseLive, caseCold, caseStripSurvivesReconcile]) {
   console.log(`\n===== ${c.name} =====`)
   try {
     await c()

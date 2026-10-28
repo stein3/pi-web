@@ -557,7 +557,12 @@ rl.on('line', async (line) => {
     // response carries the raw Error message (rpc-mode catches the throw).
     const mode = process.env.FAKE_PI_COMPACT || 'ok'
     const slow = mode === 'slow' || mode === 'slowfail'
-    const ms = Number(process.env.FAKE_PI_COMPACT_MS || (slow ? 1200 : 120))
+    // A check can also pick the window per request: the bridge forwards
+    // /summarize's `customInstructions` (pi's real argument), so a marker in it
+    // lets ONE case run a summary long enough to outlive a 10s watchdog tick
+    // without slowing every other case in the file.
+    const req_ms = Number(/CHECK_COMPACT_MS=(\d+)/.exec(String(cmd.customInstructions ?? ''))?.[1])
+    const ms = req_ms || Number(process.env.FAKE_PI_COMPACT_MS || (slow ? 1200 : 120))
     // pi's own guard (core/agent-session.js:1620): a prompt landing during a
     // summary is REFUSED, not queued. The backstop timer only matters if this
     // handler throws — the normal paths clear it themselves.

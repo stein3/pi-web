@@ -224,6 +224,10 @@ function childIdleMs(s) {
 
 function reapable(s) {
   if (s.isStreaming) return false // a turn is running (turn_start -> agent_settled)
+  // A summary in flight looks idle to tau (see `compacting` in entryFor) and
+  // writes nothing to the JSONL until it lands, so it is the MOST idle-looking
+  // session on the box right before MAX_LIVE pressure evicts it.
+  if (live.get(s.id)?.compacting) return false
   if (s.pending?.size) return false // an RPC round-trip is in flight
   if (s.pendingDialogs?.size) return false // a permission/question dialog is open
   if (s.abortState && s.abortState !== 'idle') return false // an abort is settling
@@ -272,6 +276,15 @@ function entryFor(tauId) {
       byCall: new Map(),
       toolStart: new Map(),
       file: null, // last sessionFile seen (drives the canonical-uuid alias)
+      // A summary is being generated on this child (pi compaction_start ->
+      // compaction_end). pi's manual compact() emits NEITHER agent_start nor
+      // turn_start (core/agent-session.js `compact()` aborts any live run
+      // first), and tau's `isStreaming` is set ONLY by those two (pi-tau-web-
+      // server src/server/sessions.ts:462), so `isStreaming` is false for the
+      // whole summary. Anything that calls a session busy — GET /session/status
+      // (the webui's 10s busy-reconcile watchdog reads it and clears busy AND
+      // compacting from it), the idle reaper — must consult this flag too.
+      compacting: false,
       revert: null, // opencode-style revert point ({messageID, partID?}) until the next turn
       armed: false,
       named: false, // a name is settled for this child (pi's own, or one we sent)
@@ -1386,11 +1399,16 @@ function onPiEvent(tauId, ev) {
     return
   }
   if (t === 'compaction_start' || t === 'summarization_retry_scheduled') {
+    // The ONLY signal that a summary is in flight. Set it here (not in the
+    // /summarize handler): compaction starts in the TUI, at the context ceiling
+    // and on a retry too, and every one of those must read as busy.
+    e.compacting = true
     emitFor(tauId, 'session.next.compaction.started', { sessionID: tauId })
     return
   }
   if (t === 'compaction_end' || t === 'summarization_retry_finished') {
     // whatever the outcome, the session can take a prompt again
+    e.compacting = false
     settleCompaction(tauId)
     emitFor(tauId, 'session.next.compaction.ended', { sessionID: tauId })
     // The summary itself is transcript content, and it arrives ONLY here: pi
@@ -2350,10 +2368,15 @@ async function handleApi(req, res, url) {
 
   // ---- session status -----------------------------------------------------
   if (pathname === '/oc/session/status') {
+    // Authoritative for the webui: its busy-reconcile watchdog overwrites the
+    // local busy/compacting flags with what it reads HERE (sse.ts catchUp), so
+    // a summary in flight must say busy or the "Compacting session…" strip dies
+    // mid-summary. See entryFor().compacting.
     const out = {}
     for (const s of liveManager.sessions.values()) {
+      const busy = !!s.isStreaming || live.get(s.id)?.compacting === true
       const ids = publicIdsFor(s.id)
-      for (const id of ids) out[id] = { type: s.isStreaming ? 'busy' : 'idle' }
+      for (const id of ids) out[id] = { type: busy ? 'busy' : 'idle' }
     }
     return sendJson(res, out)
   }
