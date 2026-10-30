@@ -248,7 +248,13 @@ try {
     const mid = await e2e.poll(async () => (await boxState()).running, 4000)
     check(mid, 'the running compaction BOX is on screen')
     let s = await boxState()
-    check(/Compacting session/.test(s.runningText), `it says what is running (${JSON.stringify(s.runningText)})`)
+    // The row's WORDING belongs to the webui (AGENTS.md: the bridge sends pi's raw
+    // summary, never a formatted head line), so this asserts the running box NAMES
+    // the activity without pinning the phrase the built dist happens to use —
+    // "Compacting session" was the old wording; the dist renders "compaction
+    // summary". Pinning it made this check fail on a wording change in the sibling
+    // repo, which is a deploy pairing, not a bridge regression.
+    check(/compact|summar/i.test(s.runningText), `it says what is running (${JSON.stringify(s.runningText)})`)
     // The engine sample lands on the probe's own 1 Hz clock, so WAIT for it —
     // asserting on the frame that appeared before the first sample only proves
     // the pre-probe fallback drew.
