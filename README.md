@@ -36,6 +36,9 @@ The webui dist is bind-mounted from the sibling checkout, so build it once:
 cd ../opencode/webui && npm ci && npm run build
 ```
 
+`compose.yaml` mounts `${WEBUI_DIST:-../opencode/webui}/dist`, so a differently
+named or placed checkout needs one line in `.env`, not an edit to the compose file.
+
 Missing `index.html` produces a loud boot WARNING: the API still works, the UI 404s.
 
 Bare metal (`pi` on PATH, `pi-tau-web-server` resolvable):

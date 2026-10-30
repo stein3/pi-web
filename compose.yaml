@@ -23,8 +23,9 @@ services:
       - ./config/pi-agent:/home/node/.pi/agent
       - ${HOST_WORKSPACE}:/workspace
       # webui dist lives in the sibling nopencode checkout (built once with
-      # `cd ../opencode/webui && npm ci && npm run build`).
-      - ../opencode/webui/dist:/app/webui:ro
+      # `cd ../opencode/webui && npm ci && npm run build`). WEBUI_DIST names that
+      # checkout if yours sits elsewhere; empty/unset keeps the default.
+      - ${WEBUI_DIST:-../opencode/webui}/dist:/app/webui:ro
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
