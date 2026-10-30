@@ -173,6 +173,13 @@ let thinkingLevel = 'medium'
 // pi streams a thinking block only while the level is not "off" — so a check
 // can prove the webui's variant actually reached the child by its absence.
 const thinksNow = () => THINKING && thinkingLevel !== 'off'
+// pi also RE-PICKS a thinking level on EVERY model switch: it prefers a
+// per-model settings default, then the global one, then the live level
+// (core/agent-session.js `_getThinkingLevelForModelSwitch`). A bridge that
+// set_model-s on every prompt therefore silently undoes the webui's variant
+// pick. Emulated only when a check asks (FAKE_PI_MODEL_RESETS_THINKING=1),
+// because no other check sets a level at all.
+const MODEL_RESETS_THINKING = process.env.FAKE_PI_MODEL_RESETS_THINKING === '1'
 
 // Captured verbatim from a real pi 1.3.0 edit result (pi's own
 // generateUnifiedPatch / generateDiffString over "file contents" -> "v2").
@@ -509,6 +516,10 @@ rl.on('line', async (line) => {
     resp(cmd, { disposition: 'started' })
     void run(text, images)
   } else if (cmd.type === 'set_model') {
+    if (MODEL_RESETS_THINKING) {
+      thinkingLevel = 'medium'
+      out({ type: 'thinking_level_changed', level: thinkingLevel })
+    }
     resp(cmd, { provider: cmd.provider, id: cmd.modelId })
   } else if (cmd.type === 'set_thinking_level') {
     // pi: setThinkingLevel() clamps to the model's levels, appends a

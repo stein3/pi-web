@@ -308,6 +308,7 @@ function entryFor(tauId) {
       // carries the summary; tau's entries never record it). See transcriptEntries().
       compactions: [],
       level: null, // last thinking level this bridge asked pi for (webui variant)
+      modelRef: '', // "provider\0modelId" last applied to THIS child
     }
     live.set(tauId, e)
   }
@@ -2312,6 +2313,7 @@ const STATE_RANK = { loaded: 0, sleeping: 1, unloaded: 2 }
 // only signal available. A false negative here costs a model nobody would pick.
 const EMBEDDING_RE = /embed|rerank/i
 const storeCache = { mtime: 0, providers: [] }
+const modelsJsonCache = { mtime: 0, overrides: {} }
 let routerCache = { at: 0, base: '', models: [] }
 
 function readJson(p) {
@@ -2348,6 +2350,36 @@ function thinkingVariants(m) {
   return Object.keys(out).length > 1 ? out : undefined
 }
 
+/**
+ * `modelOverrides` from `<agentDir>/models.json` — the layer pi composes LAST
+ * (core/provider-composer.js `applyModelOverride`: reasoning, thinkingLevelMap,
+ * compat are all overridable). It matters because `models-store.json` is a CACHE
+ * pi's providers rewrite: the llama provider re-probes /props and rewrites its
+ * section, hand-edits included (observed 2026-10-30: a hand-patched store went
+ * back to `{off, medium}` + `supportsReasoningEffort:false` on the restart after
+ * a rebuild). So the catalogue this bridge publishes for the picker has to apply
+ * the same override the child will actually run under, or the webui advertises a
+ * thinking ladder pi ignores (or hides one it honors).
+ */
+function modelsJsonOverrides(agentDir) {
+  const file = path.join(agentDir, 'models.json')
+  let st
+  try {
+    st = fs.statSync(file)
+  } catch {
+    return {}
+  }
+  if (modelsJsonCache.mtime === st.mtimeMs) return modelsJsonCache.overrides
+  const raw = readJson(file) ?? {}
+  const out = {}
+  for (const [pid, entry] of Object.entries(raw?.providers ?? {})) {
+    if (entry?.modelOverrides) out[pid] = entry.modelOverrides
+  }
+  modelsJsonCache.mtime = st.mtimeMs
+  modelsJsonCache.overrides = out
+  return out
+}
+
 function storeProviders() {
   const file = path.join(PI_AGENT_DIR, 'models-store.json')
   let st
@@ -2358,6 +2390,7 @@ function storeProviders() {
   }
   if (storeCache.mtime === st.mtimeMs) return storeCache.providers
   const raw = readJson(file) ?? {}
+  const overrides = modelsJsonOverrides(PI_AGENT_DIR)
   const providers = []
   for (const [pid, entry] of Object.entries(raw)) {
     const models = {}
@@ -2365,12 +2398,21 @@ function storeProviders() {
     for (const m of entry?.models ?? []) {
       if (!m?.id || m.type) continue // typed sections (vision) are not chat models
       if (!routerBase && m.baseUrl) routerBase = String(m.baseUrl).replace(/\/v1\/?$/, '')
+      const ov = overrides[pid]?.[m.id] ?? {}
+      // pi merges a map, it does not replace it (applyModelOverride).
+      const eff = {
+        ...m,
+        ...(ov.reasoning === undefined ? {} : { reasoning: ov.reasoning }),
+        ...(ov.thinkingLevelMap || m.thinkingLevelMap
+          ? { thinkingLevelMap: { ...(m.thinkingLevelMap ?? {}), ...(ov.thinkingLevelMap ?? {}) } }
+          : {}),
+      }
       models[m.id] = {
         id: m.id,
         name: m.name ?? m.id,
         limit: { context: m.contextWindow ?? 0, output: m.maxTokens ?? 0 },
-        ...(m.reasoning === undefined ? {} : { reasoning: !!m.reasoning }),
-        ...(thinkingVariants(m) ? { variants: thinkingVariants(m) } : {}),
+        ...(eff.reasoning === undefined ? {} : { reasoning: !!eff.reasoning }),
+        ...(thinkingVariants(eff) ? { variants: thinkingVariants(eff) } : {}),
       }
     }
     if (Object.keys(models).length) providers.push({ id: pid, name: pid, models, routerBase })
@@ -2764,16 +2806,22 @@ async function handleApi(req, res, url) {
   if (am) {
     const body = await readBody(req)
     const s = sessionByAnyId(decodeURIComponent(am[1]))
-    if (s && am[2] === 'model' && body.model?.id) {
+    const ref = modelRefOf(body)
+    if (s && am[2] === 'model' && ref.modelId) {
       await s
-        .send({ type: 'set_model', provider: body.model.providerID ?? '', modelId: body.model.id }, { timeoutMs: 10000 })
+        .send({ type: 'set_model', provider: ref.provider, modelId: ref.modelId }, { timeoutMs: 10000 })
         .catch(() => {})
       const ent = entryFor(s.id)
-      ent.level = null // the model switch re-picks a level; re-apply the pick below
-      const level = typeof body.model?.variant === 'string' ? body.model.variant : null
-      if (level) {
-        await s.send({ type: 'set_thinking_level', level }, { timeoutMs: 5000 }).catch(() => null)
-        ent.level = level
+      ent.modelRef = `${ref.provider}\u0000${ref.modelId}`
+      ent.level = null // the model switch re-picks a level; the pick goes below
+      // This POST is the user's own switch, and webui clearVariant() posts the
+      // model with NO variant — so an absent variant here means "cleared" and
+      // pi's freshly re-picked level is the answer. Do not re-assert the old one.
+      if (ref.variant) {
+        const r = await s.send({ type: 'set_thinking_level', level: ref.variant }, { timeoutMs: 5000 }).catch(() => null)
+        if (r?.success === false)
+          console.log(`[thinking] ${s.id}: pi rejected level "${ref.variant}" (${r.error ?? 'unknown'}) — using the session's level`)
+        else ent.level = ref.variant
       }
       emitSessionUpdated(s.id, s, undefined, true)
     }
@@ -2806,7 +2854,16 @@ async function handleApi(req, res, url) {
     }
     if (!st?.isDirectory()) return sendJson(res, { error: `not a directory: ${cwd}` }, 400)
     const s = await liveManager.create({ cwd, model: modelSpec(body?.model) })
-    entryFor(s.id)
+    const ent = entryFor(s.id)
+    const ref = modelRefOf(body)
+    if (ref.modelId) ent.modelRef = `${ref.provider}\u0000${ref.modelId}`
+    // tau picked the model at spawn, and pi re-picked a thinking level with it,
+    // so a variant that came with the create has to go AFTER it.
+    if (ref.variant) {
+      const r = await s.send({ type: 'set_thinking_level', level: ref.variant }, { timeoutMs: 5000 }).catch(() => null)
+      if (r?.success === false) console.log(`[thinking] create: pi rejected level "${ref.variant}" (${r.error ?? 'unknown'})`)
+      else ent.level = ref.variant
+    }
     armSession(s)
     // answer with pi's id, not the per-child handle: see learnPublicId
     await learnPublicId(s)
@@ -2954,23 +3011,31 @@ async function handleApi(req, res, url) {
         )
       if (!text && !images.length) return sendJson(res, apiErr('empty prompt'), 400)
       const streaming = !!s.isStreaming
-      const ent = entryFor(s.id) // per-bridge session state (thinking level lives here)
+      const ent = entryFor(s.id) // per-bridge session state (model ref + thinking level live here)
+      // The webui re-posts its model pick on EVERY prompt (Composer.svelte), so
+      // apply it only when the ref actually differs from what THIS child last
+      // got: pi re-picks a thinking level on every set_model, so a per-prompt
+      // set_model would undo the variant pick and cost a round trip for nothing.
+      const ref = modelRefOf(body)
+      const want = ref.modelId ? `${ref.provider}\u0000${ref.modelId}` : ''
+      const prevLevel = ent.level
+      let switched = false
       // A steer never changes the model: the turn it lands inside is already
       // running on whatever model produced it.
-      if (body.model?.id && !(streaming && delivery === 'steer')) {
+      if (want && want !== ent.modelRef && !(streaming && delivery === 'steer')) {
         await s
-          .send(
-            { type: 'set_model', provider: body.model.providerID ?? '', modelId: body.model.id },
-            { timeoutMs: 10000 },
-          )
+          .send({ type: 'set_model', provider: ref.provider, modelId: ref.modelId }, { timeoutMs: 10000 })
           .catch(() => {})
-        // set_model re-picks a thinking level from settings, so the level has to
-        // be applied AFTER it, and the variant has to survive the model switch.
+        ent.modelRef = want
         ent.level = null
+        switched = true
       }
       // webui variant -> pi thinking level. Only when it changed: this rides on
-      // every prompt, and an RPC round trip per prompt is pure latency.
-      const level = typeof body.model?.variant === 'string' ? body.model.variant : null
+      // every prompt, and an RPC round trip per prompt is pure latency. A body
+      // with NO variant is not a clear (webui clearVariant posts the model with
+      // no variant to /api/session/{id}/model), so when the bridge itself just
+      // switched the model it has to put the session's level back afterwards.
+      const level = ref.variant ?? (switched ? prevLevel : null)
       if (level && level !== ent.level) {
         const r = await s.send({ type: 'set_thinking_level', level }, { timeoutMs: 5000 }).catch(() => null)
         if (r?.success === false) {
@@ -3303,8 +3368,27 @@ async function handleApi(req, res, url) {
 }
 
 function modelSpec(model) {
-  if (!model?.id) return ''
-  return `${model.providerID ?? ''}/${model.id}`
+  const { provider, modelId } = modelRefOf({ model })
+  return modelId ? `${provider}/${modelId}` : ''
+}
+
+/**
+ * One shape for every model the webui posts, because it posts two. Picks that
+ * name a session (`createSession`, `setSessionModel`) use `model: {providerID,
+ * id, variant?}`; the prompt body (`api.ts prompt()`) uses opencode's shape —
+ * `model: {providerID, modelID}` with the thinking **variant as a top-level
+ * body field**. Reading only `model.id` / `model.variant` silently dropped BOTH
+ * out of every prompt: the model pick never landed, and the composer's thinking
+ * selector looked dead — for a tab that had no child at pick time the sibling
+ * `/api/session/{id}/model` POST goes nowhere, so the prompt body is the only
+ * channel that always exists. The engine reports variant:"default" for unset.
+ */
+function modelRefOf(body) {
+  const m = body?.model ?? {}
+  const modelId = typeof m.id === 'string' ? m.id : typeof m.modelID === 'string' ? m.modelID : ''
+  const provider = typeof m.providerID === 'string' ? m.providerID : typeof m.provider === 'string' ? m.provider : ''
+  const v = typeof m.variant === 'string' ? m.variant : typeof body?.variant === 'string' ? body.variant : ''
+  return { provider, modelId, variant: v && v !== 'default' ? v : null }
 }
 
 function expandHome(p) {

@@ -134,6 +134,23 @@ this file is what matters when you edit the bridge.
   with nothing to draw (`box-check` caught that). Park after `ENGINE_FAIL_LIMIT`
   consecutive failures and poll ZERO while nothing is busy — that engine is the
   agent's own model.
+- **Model and thinking level ride the prompt body.** The webui posts a model two
+  ways: session-scoped picks as `model:{providerID,id,variant}`, and on every
+  prompt as opencode's shape — `model:{providerID,modelID}` with the thinking
+  **variant top-level** (`api.ts prompt()`). `modelRefOf()` accepts both; reading
+  only `model.id`/`model.variant` dropped the pick and made the thinking selector
+  look dead (for a tab with no live child the sibling `/api/session/{id}/model`
+  POST resolves to nothing, so the prompt body is the only channel that always
+  exists). Send `set_model` only when the ref actually changed — pi re-picks a
+  thinking level on EVERY `set_model` — and re-assert the session level after a
+  switch the bridge itself made; an explicit `/model` POST with no variant is the
+  *clear* (`clearVariant`) and must not re-assert. `web/.testbin/thinking-check.mjs`
+  holds it (plus: pi silently clamps unsupported levels, and the store's
+  `compat.supportsReasoningEffort` / `thinkingLevelMap.off` decide whether a level
+  reaches the engine at all). `models-store.json` is a CACHE pi's providers rewrite
+  — its llama provider re-puts its own two-level ladder over hand edits — so the
+  picker catalogue (`storeProviders`) must merge `<agentDir>/models.json`
+  `modelOverrides`, the layer pi composes last and never rewrites.
 - **SSE volume.** Do not mirror every pi event as `session.updated`: one
   coalesced frame per relevant metadata change, plus one at turn end. Deltas must
   rebuild the assistant text exactly, and a snapshot must equal the delta sum.
