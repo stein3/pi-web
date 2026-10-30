@@ -871,22 +871,64 @@ function safeJson(s) {
  *
  * Deliberately dumb: a model call per session on a single-slot local router
  * costs more than a name is worth. Rules — collapse whitespace (pi normalizes
- * newlines in names anyway), strip conversational filler, cut at a sentence end
- * inside the first 80 chars, else clamp to 60 at a word boundary with an
- * ellipsis, capitalise the first character.
+ * newlines in names anyway), strip leading filler to a fixed point, cut at a
+ * sentence end inside the first 80 chars, else clamp to 60 at a word boundary
+ * with an ellipsis, capitalise the first character.
+ *
+ * The strip list is why a name is not just the prompt truncated: an opener like
+ * `my …` or `I think the …` must not survive into the sidebar.
  */
-const FILLER_PREFIX =
-  /^(?:ok|okay|so|actually|hey|hi|hello|please|can you|could you|would you|i want(?:ed)? to|i wanna|let'?s|now|also|just)\b[\s,:!-]*/i
+// <titler>
+// Pure text rules; .testbin/titlefill-check.mjs extracts this block verbatim and
+// asserts a table, so keep the two markers and add no I/O inside.
+//
+// Leading filler, one rule per source line. Applied at the START only, and
+// repeatedly, because prompts stack openers ("ok so my …"). Ordered: a longer
+// frame before the shorter one it would shadow (`there is` before `there`,
+// `that's` before `that`). Deliberately conservative — a word that can open real
+// content is NOT in here (`the`, `a`, `look`, `next`, `well`, `right`, `and`,
+// `how`, `what`, bare `i`): eating the start of a real sentence is worse than a
+// title that opens with a determiner.
+const FILLER_SOURCES = [
+  // politeness / request frames
+  'do you mind',
+  '(?:can|could|would|should) (?:you|i)(?: please)?',
+  'please(?: kindly)?',
+  'thank(?: ?you)?s?|thx',
+  'sorry',
+  // first-person mental / intent frames: "I think the…", "I need you to…"
+  'i (?:think|thought|believe|reckon|guess|suspect|assume|recall|remember|hope|expect|noticed?)(?: that)?',
+  "i(?:'m| am)? was wondering(?: (?:if|whether|that|what|why|how|when|where))?",
+  "i(?:'d| would)? (?:like|love)",
+  'i (?:need|needed|want|wanted|had to|have to|gotta)(?: you to| to| it)?',
+  // the bare first-person subject, then the intent verb as its own rule: the
+  // loop joins them ("i'm trying to" = `i'm` then `trying to`)
+  "i(?:'m| am)",
+  'trying to|looking to|working on|dealing with|stuck on|curious about|figuring out',
+  // conversational openers
+  'ok(?:ay)?|okey|okie|so|now|also|just|actually|basically|apparently|anyway(?:s)?|hey|hi|hello|btw|fyi|um+|uh+|er+|hmm+',
+  // dummy subjects and the possessive / demonstrative openers that carry nothing
+  "there(?:'s|'re)? (?:is|are|was|were|has|have|had|should|can|could|will|would|seems?)",
+  "there(?:'s|'re)?",
+  "it(?:'s| is)(?: (?:seems?|looks? like|appears|clear|obvious))?",
+  "here'?s",
+  'my|our|your|their|her|his|its',
+  "that'?s|this|that|these|those",
+]
+const FILLER_PREFIX = new RegExp(`^(?:${FILLER_SOURCES.join('|')})\\b[\\s,:.!-]*`, 'i')
 
 function autoTitle(text) {
   if (typeof text !== 'string') return ''
-  let t = text.replace(/\s+/g, ' ').trim()
+  const orig = text.replace(/\s+/g, ' ').trim()
+  let t = orig
   let prev = ''
-  while (t !== prev) {
+  for (let i = 0; t !== prev && i < 8; i++) {
     prev = t
     t = t.replace(FILLER_PREFIX, '').trim()
   }
-  if (!t) return ''
+  // Stripped down to politeness residue: the prompt IS the content, so keep it
+  // rather than invent a fragment out of the last words of a request frame.
+  if ((t.match(/\p{L}/gu) ?? []).length < 3) t = orig
   const se = t.search(/[.!?](\s|$)/)
   if (se > 10 && se < 80) t = t.slice(0, se + 1)
   if (t.length > 60) {
@@ -896,6 +938,8 @@ function autoTitle(text) {
   }
   return t.charAt(0).toUpperCase() + t.slice(1)
 }
+
+// </titler>
 
 /** the first user prompt in a set of pi session entries ('' when there is none) */
 function firstUserText(entries) {
