@@ -1,6 +1,7 @@
 {
   "name": "web",
   "version": "1.0.0",
+  "private": true,
   "main": "pi-web.mjs",
   "scripts": {
     "start": "node pi-web.mjs",
