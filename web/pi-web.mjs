@@ -43,7 +43,7 @@
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
 // ---------------------------------------------------------------------------
@@ -573,6 +573,47 @@ function newSessionId() {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
 }
 
+/**
+ * An entry id that is not already in this transcript.
+ *
+ * pi generates 8 hex chars and collision-checks them against its own index
+ * (`generateId`, core/session-manager.js:21), and pi-web must do the same for
+ * every entry it writes behind a child's back — because pi indexes EVERY entry by
+ * `entry.id` (`_buildIndex`, session-manager.js:732) and resolves each entry's
+ * `parentId` through that map. A duplicate key, or an entry with NO id (which
+ * indexes as `undefined`), makes `parentId` resolve back to an earlier entry that
+ * shares the key: a CYCLE. pi's `buildSessionPath()` has no cycle guard and pushes
+ * forever (`RangeError: Invalid array length`, session-manager.js:140); the
+ * bridge's own `leafChain()` HAS a seen-set, so it truncates to a couple of
+ * entries instead — which is why a broken transcript reads "0 msgs" in the sidebar
+ * and renders the new-session page instead of failing visibly.
+ *
+ * Two places used to get this wrong: the fork's title entry (`id: "forkname"`, a
+ * fixed string that collides with the previous fork's) and `appendSessionInfo`
+ * (which wrote no id at all). Copied ids are NEVER rewritten — pi's
+ * `firstKeptEntryId` and a revert marker's `targetId` both address them.
+ */
+function freshEntryId(taken) {
+  for (let i = 0; i < 100; i++) {
+    const id = randomUUID().slice(0, 8)
+    if (!taken.has(id)) return id
+  }
+  return randomUUID().replace(/-/g, '').slice(0, 12)
+}
+
+/** every entry id a transcript already uses (missing ids excluded — see below) */
+function entryIdsIn(file) {
+  const out = new Set()
+  for (const e of readJsonl(file)) {
+    if (e?.type === 'session') {
+      if (e.id) out.add(e.id)
+      continue
+    }
+    if (e?.id) out.add(e.id)
+  }
+  return out
+}
+
 /** how many forks already point at this transcript (the webui wants "(fork #N)") */
 function forkCount(file) {
   let n = 0
@@ -612,18 +653,114 @@ function forkTranscript(file, keepEntries, name) {
     cwd: liveCwd(srcHeader.cwd) || PI_CWD,
     parentSession: path.resolve(file),
   }
+  // A brand-new transcript must not inherit anything the row cache holds, and the
+  // listing must see it: the fork is read back immediately, and a stale row makes
+  // fileForId resolve it to some OTHER session's file.
+  metaCache.delete(dest)
   const fd = fs.openSync(dest, 'wx') // never clobber
   try {
     fs.writeFileSync(fd, JSON.stringify(header) + '\n')
     for (const e of keepEntries) fs.writeFileSync(fd, JSON.stringify(e) + '\n')
-    if (name) {
-      const last = keepEntries.length ? keepEntries[keepEntries.length - 1].id : null
-      fs.writeFileSync(fd, JSON.stringify({ type: 'session_info', id: 'forkname', parentId: last, timestamp: stamp, name }) + '\n')
+    // NEVER title a fork whose copied entries end at an entry with no parent.
+    // pi's buildSessionPath (core/session-manager.js:124-143) walks from
+    // `_buildIndex`'s leaf — the LAST non-header entry in the file — and stops at
+    // the first entry whose `parentId` is null. So a trailing orphan makes the whole
+    // session project ZERO messages, whatever was written before it: "0 msgs", the
+    // new-session page, tab closes. A revert of the FIRST user message produces
+    // exactly that tail (resetLeaf -> appendCustomEntry parents at leafId = null),
+    // and pi's own `forkFrom` copies every entry verbatim, so pi's CLI fork is blank
+    // too. Titleing it would only bury the reason.
+    const tailOrphan = keepEntries.length
+      ? keepEntries[keepEntries.length - 1]?.parentId == null
+      : false
+    // `lastEntryId` skips an entry that has NO id: pi's `_buildIndex` keys it under
+    // `undefined`, so it can never be a walk target. Parenting the title entry at
+    // `undefined` (i.e. null) would make the fork's own tail an orphan, and
+    // buildSessionPath stops at the first null parentId — the fork would project
+    // zero messages even though the source read fine.
+    const lastEntryId = [...keepEntries].reverse().find((e) => e?.id)?.id ?? null
+    if (name && !tailOrphan && lastEntryId) {
+      const last = lastEntryId
+      // NEVER a fixed id and never omitted: the copied chain may already hold it,
+      // and pi resolves parentId through an index keyed by `entry.id` (missing ids
+      // included). See freshEntryId.
+      const taken = new Set([id, ...keepEntries.map((e) => e?.id).filter(Boolean)])
+      fs.writeFileSync(
+        fd,
+        JSON.stringify({ type: 'session_info', id: freshEntryId(taken), parentId: last, timestamp: stamp, name }) + '\n',
+      )
     }
   } finally {
     fs.closeSync(fd)
   }
   return { file: dest, id }
+}
+
+/**
+ * The entries to copy into a fork, in file order (header excluded).
+ *
+ * pi's own `forkFrom` (core/session-manager.js:1374-1415) copies EVERY non-header
+ * entry of the source file — it does not walk an active path at all. Do the same.
+ *
+ * A chain-based fork was the bug. Revert to the FIRST user message and pi's own
+ * navigation marker becomes an orphan ROOT: `resetLeaf()` sets leafId to null
+ * (core/agent-session.js:3364) and `appendCustomEntry` then parents at
+ * `this.leafId` (session-manager.js:901-911). So the "active path" is ONE entry, a
+ * chain-based fork copied marker + title row, pi projected ZERO messages, the
+ * sidebar row read "0 msgs", and the tab closed itself — exactly the reported
+ * "workspace cleanup pi-web (fork #N)" sessions.
+ *
+ * A live child's `get_entries` (rpc-mode.js:503) is still consulted, but only to
+ * ADD entries the file has not written yet — never to decide what the history is.
+ * (Never `get_tree`: it nests nodes, and walking a resumed child's leafId through
+ * that tree dies at the first parent the child never loaded.)
+ */
+async function forkEntriesFor(s, file) {
+  const all = readJsonl(file).filter((e) => e?.type !== 'session')
+  if (!s) return forkResult(all, file)
+  let extra = []
+  try {
+    const r = await s.send({ type: 'get_entries' }, { timeoutMs: 15000 })
+    if (r?.success !== false) {
+      const known = new Set(all.map((e) => e.id).filter(Boolean))
+      extra = (r?.data?.entries ?? [])
+        .filter((e) => e?.type !== 'session' && e?.id && !known.has(e.id))
+        .map((e) => ({ ...e, parentId: e.parentId ?? (all.length ? all[all.length - 1].id : null) }))
+    }
+  } catch {
+    /* child not answering — the file alone is still a complete transcript */
+  }
+  return forkResult([...all, ...extra], file)
+}
+
+// pi's forkFrom (core/session-manager.js:1374) refuses only an EMPTY transcript.
+// It is not enough here, because of how pi resolves a transcript on load:
+// `_buildIndex` (session-manager.js:732-745) sets the leaf to the LAST non-header
+// entry, and `buildSessionPath` (124-143) then walks parents and STOPS at the first
+// entry whose `parentId` is null. So a transcript that ENDS at an orphan projects
+// ZERO messages no matter what precedes it — verified against pi itself: user +
+// assistant + a root-parented navigation marker reads back as `messages: 0`. That is
+// the reported bug: fork a session whose last revert went to the first message and
+// the new row says "0 msgs", opens the new-session page, and closes.
+// So refuse rather than write a session nothing can render, and tell the user what
+// actually happened to their history.
+const MIN_FORK_ENTRIES = 2
+
+function forkResult(entries, file) {
+  if (!entries.length) {
+    return { error: `${path.basename(file)} has no entries to fork` }
+  }
+  if (entries[entries.length - 1]?.parentId == null) {
+    return {
+      error:
+        `${path.basename(file)} ends at an entry with no parent, so pi would project it as an empty session — ` +
+        'fork a message further down, or move the leaf back with /tree first',
+    }
+  }
+  if (entries.length < MIN_FORK_ENTRIES) {
+    return { error: `${path.basename(file)} has only one forkable entry — refusing to write an unreadable fork` }
+  }
+  return { entries }
 }
 
 /**
@@ -1811,9 +1948,20 @@ function appendSessionInfo(file, name) {
   // first conversation entry, so a file we made first would make pi throw.
   if (!fs.existsSync(file)) return false
   try {
+    const ids = entryIdsIn(file)
+    // An id-less entry is not "harmless": pi indexes it under `undefined`, and a
+    // second one (a later rename, or a fork that copies both) resolves through the
+    // same key — see freshEntryId.
+    const parentId = leafChain(readJsonl(file)).slice(-1)[0]?.id ?? null
     fs.appendFileSync(
       file,
-      JSON.stringify({ type: 'session_info', name, timestamp: new Date().toISOString() }) + '\n',
+      JSON.stringify({
+        type: 'session_info',
+        id: freshEntryId(ids),
+        ...(parentId ? { parentId } : {}),
+        name,
+        timestamp: new Date().toISOString(),
+      }) + '\n',
     )
     metaCache.delete(file)
     return true
@@ -2045,17 +2193,46 @@ function fileForId(id) {
   // and pi would mint a SECOND uuid inside a file named after the first.
   if (s?.sessionFile && fs.existsSync(s.sessionFile)) return s.sessionFile
   if (reapedFile.has(id)) return reapedFile.get(id) // child reaped; file still there
-  const byId = allSessionMeta().find((m) => m.id === id)
-  if (byId) return byId.file
-  const byTau = allSessionMeta().find((m) => m.file && path.basename(m.file).includes(id))
-  return byTau?.file ?? null
+  // NOT allSessionMeta(): that walks a list cached for 1.5 s, so right after a
+  // fork/rename/turn it can hand back a transcript path that no longer describes
+  // this session. Fork is the route that gets bitten — it copies whatever path it is
+  // given, and copying the wrong file writes a transcript whose parentIds point at
+  // entries that are not in it, which pi projects as ZERO messages ("0 msgs").
+  const fresh = findFileByUuid(id)
+  return fresh ?? allSessionMeta().find((m) => m.id === id)?.file ?? null
 }
 
+/**
+ * The transcript named by pi's public session uuid, resolved from the directory
+ * listing (NOT the cached sidebar rows). The uuid is part of the file name —
+ * `<iso-ts>_<uuid>.jsonl` — so a direct scan is exact and cannot be stale.
+ */
+function findFileByUuid(id) {
+  if (!id || !/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(id)) return null
+  const suffix = `_${id}.jsonl`
+  for (const f of listFiles()) if (f.endsWith(suffix)) return f
+  return null
+}
+
+/**
+ * Transcript entries for the pure-history route.
+ *
+ * A live child's mirror is NOT a transcript. tau's `trackMessage`
+ * (pi-tau-web-server/bin/sessions.js:490-500) pushes `{type:'message', message}`
+ * with NO `id` and NO `parentId`, holds only what THIS process streamed, and never
+ * drops the branch a revert abandoned. Projecting it made `/api/history/session/
+ * {id}` disagree with the sidebar row (which reads the file), so opening a fork
+ * from the sidebar showed one thing and its row another.
+ *
+ * The JSONL is the transcript: pi wrote it, pi re-loads it on the next cold start,
+ * and `leafChain` gives the same active path pi would derive. A child with no file
+ * yet (created, never prompted) still has only its mirror, so that stays.
+ */
 function entriesForId(id) {
-  const s = sessionByAnyId(id)
-  if (s) return s.entries
   const file = fileForId(id)
-  return file ? readJsonl(file) : null
+  if (file) return leafChain(readJsonl(file))
+  const s = sessionByAnyId(id)
+  return s?.entries ?? null
 }
 
 /**
@@ -2259,7 +2436,10 @@ const NOT_WIRED = new Set([])
 // POST sub-routes that must resume a cold/reaped session instead of 404ing
 // (they run inside a pi child). `/abort` deliberately does NOT: waking a child
 // only to abort it would resurrect a tab nobody asked for.
-const RESUME_ON_POST = new Set(['/prompt_async', '/command', '/queue/clear', '/summarize', '/revert', '/fork'])
+const RESUME_ON_POST = new Set(['/prompt_async', '/command', '/queue/clear', '/summarize', '/revert'])
+// `/fork` is deliberately NOT in that set: it copies a transcript, and the file IS
+// the transcript. Resuming a child first only costs a spawn and hands back a tree
+// holding just what that child appended since it resumed (see forkEntriesFor).
 // opencode surfaces that degrade cleanly to "nothing here"
 const EMPTY_VCS = { '/oc/vcs/diff': [], '/oc/vcs/diff/raw': '' }
 
@@ -3004,6 +3184,11 @@ async function handleApi(req, res, url) {
     // the reaper closed must be able to send a prompt without the browser first
     // GETing the session. Resume is the existing cold path, and `raw` stays the
     // address events come back on.
+    //
+    // `/fork` opts out of that: it copies a transcript rather than talks to a
+    // model, so it must not pay a pi spawn, and `s` is only the child already
+    // attached to this id, if any (see handleFork / forkEntriesFor).
+    if (rest === '/fork' && req.method === 'POST') return handleFork(req, res, raw, sessionByAnyId(raw))
     const s =
       req.method === 'GET' || RESUME_ON_POST.has(rest)
         ? await sessionFor(raw)
@@ -3284,55 +3469,6 @@ async function handleApi(req, res, url) {
         200,
       )
     }
-    if (rest === '/fork' && req.method === 'POST') {
-      // The webui contract (api.ts forkSession, Transcript.svelte forkFrom,
-      // commands.ts /fork): return the NEW session (id + title); the engine
-      // copies everything BEFORE the picked message and titles the fork itself.
-      // No child is spawned for the fork — the new tab's first request resumes it
-      // through the normal cold path, with the uuid as its public id from byte one.
-      const body = (await readBody(req)) ?? {}
-      const mid = String(body.messageID ?? '').trim()
-      const file = fileForId(raw)
-      if (!file || !fs.existsSync(file)) {
-        // a created-but-never-prompted session has no transcript to copy
-        return sendJson(res, apiErr('this session has no transcript to fork yet'), 400)
-      }
-      const chain = leafChain(readJsonl(file)).filter((e) => e.type !== 'session')
-      let keep = chain
-      if (mid) {
-        const entryId = entryIdInChain(chain, mid)
-        if (!entryId) return sendJson(res, apiErr(`no message ${mid} in this session`), 404)
-        const i = chain.findIndex((e) => e.id === entryId)
-        if (i < 0) return sendJson(res, apiErr(`message ${mid} is not on this session's active path`), 400)
-        keep = chain.slice(0, i) // pi's position:"before" — the picked message is excluded
-      }
-      const n = forkCount(file) + 1
-      const parentTitle = sessionMeta(file)?.title ?? ''
-      let fork = null
-      try {
-        fork = forkTranscript(file, keep, `${parentTitle} (fork #${n})`.trim())
-      } catch (err) {
-        return sendJson(res, apiErr(`failed to write the fork: ${String(err?.message ?? err)}`), 500)
-      }
-      filesCache.list = null
-      const meta = sessionMeta(fork.file)
-      console.log(`[fork] ${raw}: ${keep.length} of ${chain.length} entries -> ${path.basename(fork.file)} (parent ${path.basename(file)})`)
-      return sendJson(
-        res,
-        {
-          id: fork.id,
-          title: meta?.title ?? `${parentTitle} (fork #${n})`,
-          cwd: meta?.cwd ?? s?.cwd ?? PI_CWD,
-          time: { created: meta?.created ?? Date.now(), updated: meta?.updated ?? Date.now() },
-          ...(meta?.tokens ? { tokens: meta.tokens } : {}),
-          ...(meta?.tokens_generated ? { tokens_generated: meta.tokens_generated } : {}),
-          cost: 0,
-          model: { providerID: meta?.model_provider ?? '', id: meta?.model ?? '' },
-          revert: null,
-        },
-        200,
-      )
-    }
     return sendJson(res, { error: 'not found' }, 404)
   }
 
@@ -3409,6 +3545,74 @@ async function handleApi(req, res, url) {
   }
 
   return sendJson(res, { error: 'not found' }, 404)
+}
+
+/**
+ * POST /oc/session/{id}/fork — fork is a FILE operation.
+ *
+ * The webui contract (api.ts forkSession, Transcript.svelte forkFrom,
+ * commands.ts /fork): return the NEW session (id + title); the bridge copies
+ * everything BEFORE the picked message and titles the fork itself. No child is
+ * spawned for the fork — the new tab's first request resumes it through the normal
+ * cold path, with the uuid as its public id from byte one.
+ *
+ * `s` is a live child if one happens to exist, and null otherwise: this route must
+ * work identically for an open tab and for a sidebar row whose child the reaper
+ * closed. Forking anyway when no entry chain can be read would write a transcript
+ * that renders as an empty session — the bug this function exists to prevent — so
+ * it answers 502 instead.
+ */
+async function handleFork(req, res, raw, s) {
+  const body = (await readBody(req)) ?? {}
+  const mid = String(body.messageID ?? '').trim()
+  const file = fileForId(raw)
+  if (!file || !fs.existsSync(file)) {
+    // Nothing on disk names this id. That is either a created-but-never-prompted
+    // session (a 400, there is genuinely nothing to copy) or an id the bridge has
+    // never seen — and only one of those is the caller's *input* being wrong, which
+    // is what 404 means here. Distinguish them by whether WE know the session.
+    if (!sessionByAnyId(raw) && !reapedFile.has(raw) && !liveManager.findBySessionFile(file ?? '')) {
+      return sendJson(res, { error: 'unknown session' }, 404)
+    }
+    return sendJson(res, apiErr('this session has no transcript to fork yet'), 400)
+  }
+  const fc = await forkEntriesFor(s, file)
+  if (fc.error) return sendJson(res, apiErr(`could not read the session's entries: ${fc.error}`), 502)
+  const chain = fc.entries
+  let keep = chain
+  if (mid) {
+    const entryId = entryIdInChain(chain, mid)
+    if (!entryId) return sendJson(res, apiErr(`no message ${mid} in this session`), 404)
+    const i = chain.findIndex((e) => e.id === entryId)
+    if (i < 0) return sendJson(res, apiErr(`message ${mid} is not on this session's active path`), 400)
+    keep = chain.slice(0, i) // pi's position:"before" — the picked message is excluded
+  }
+  const n = forkCount(file) + 1
+  const parentTitle = sessionMeta(file)?.title ?? ''
+  let fork = null
+  try {
+    fork = forkTranscript(file, keep, `${parentTitle} (fork #${n})`.trim())
+  } catch (err) {
+    return sendJson(res, apiErr(`failed to write the fork: ${String(err?.message ?? err)}`), 500)
+  }
+  filesCache.list = null
+  const meta = sessionMeta(fork.file)
+  console.log(`[fork] ${raw}: ${keep.length} of ${chain.length} entries -> ${path.basename(fork.file)} (parent ${path.basename(file)})`)
+  return sendJson(
+    res,
+    {
+      id: fork.id,
+      title: meta?.title ?? `${parentTitle} (fork #${n})`,
+      cwd: meta?.cwd ?? s?.cwd ?? (liveCwd(readHeaderCwd(file)) || PI_CWD),
+      time: { created: meta?.created ?? Date.now(), updated: meta?.updated ?? Date.now() },
+      ...(meta?.tokens ? { tokens: meta.tokens } : {}),
+      ...(meta?.tokens_generated ? { tokens_generated: meta.tokens_generated } : {}),
+      cost: 0,
+      model: { providerID: meta?.model_provider ?? '', id: meta?.model ?? '' },
+      revert: null,
+    },
+    200,
+  )
 }
 
 function modelSpec(model) {

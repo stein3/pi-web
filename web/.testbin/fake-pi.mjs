@@ -23,9 +23,18 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import readline from 'node:readline'
 
+// `out` is the EVENT channel: pi emits session_info_changed / message_end here and
+// its own code has already persisted the matching entry. So mirroring to the
+// transcript belongs with the event, NOT with stdout in general — `resp()` also uses
+// out-of-band writes, and mirroring an RPC RESPONSE made the fake append a second
+// session_info for a rename it had not performed, orphaned at a null leaf.
 const out = (o) => {
   process.stdout.write(JSON.stringify(o) + '\n')
   mirrorEntry(o)
+}
+
+const emitOnly = (o) => {
+  process.stdout.write(JSON.stringify(o) + '\n')
 }
 
 // --- a transcript on disk, FAKE_PI_PERSIST=1 ---------------------------------
@@ -39,7 +48,6 @@ let pFile = null
 let pFlushed = false
 let pHeader = null
 let pParent = null
-let pSeq = 0
 const pPending = []
 
 function sessionDirFor(cwd) {
@@ -100,20 +108,73 @@ const entries = []
 const byId = new Map()
 let leafId = null
 
+// pi generates entry ids as 8 hex chars, collision-checked against its own index
+// (`generateId`, core/session-manager.js:21). The fake used a per-kind prefix
+// (`e1`, `nav12`, …) whose counter is SHARED, so a marker could still collide with
+// an id another kind had already taken — and pi indexes every entry by `entry.id`,
+// so one duplicate key is enough to make the chain resolve into itself.
+const usedIds = new Set()
+function genEntryId(prefix = '') {
+  for (let i = 0; i < 100; i++) {
+    const id = (prefix + crypto.randomUUID().slice(0, 8)).slice(-8)
+    if (!usedIds.has(id)) {
+      usedIds.add(id)
+      return id
+    }
+  }
+  return crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+}
+
 function treeAdd(entry) {
   entries.push(entry)
   byId.set(entry.id, entry)
+  usedIds.add(entry.id)
   leafId = entry.id
 }
 
-function treeOf(id) {
+// A resumed child must START with the transcript's own entries. pi loads them
+// (`_loadEntries` -> `_buildIndex`, core/session-manager.js:714-753): the ids and
+// parentIds on disk ARE the session, and the leaf is the last entry in the file.
+// The fake used to begin every child with an empty tree and mint fresh ids for
+// whatever it emitted next, so a resumed session's get_tree reported ONE message
+// while its file held twenty — which made a fork of a live session copy almost
+// nothing, and made pi (reading the FILE) unable to project the result.
+function loadTreeFromFile() {
+  const i = process.argv.indexOf('--session')
+  if (i < 0 || !process.argv[i + 1]) return
+  let raw = ''
+  try {
+    raw = fs.readFileSync(path.resolve(process.argv[i + 1]), 'utf8')
+  } catch {
+    return // no transcript yet: pi would have created an empty session too
+  }
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    let e = null
+    try {
+      e = JSON.parse(line)
+    } catch {
+      continue // torn trailing line mid-write
+    }
+    if (!e || e.type === 'session' || !e.id) continue
+    treeAdd(e)
+  }
+}
+
+// pi's getTree() (core/session-manager.js:1115) returns NESTED nodes —
+// {entry, children, label} — and tau's flattenTree() walks `children`, ignoring
+// anything it cannot reach from a root. Returning the flat entry list here made
+// every entry look like its own root, so pathFromRoot(leafId) resolved to ONE
+// entry: a fork of a live session copied almost nothing, and pi could not project
+// the result at all.
+function treeOf() {
   const kids = new Map()
   for (const e of entries) {
     const p = e.parentId ?? null
     if (!kids.has(p)) kids.set(p, [])
     kids.get(p).push(e)
   }
-  const build = (e) => ({ entry: e, children: (kids.get(e.id) ?? []).map(build) })
+  const build = (e) => ({ entry: e, children: (kids.get(e.id) ?? []).map(build), label: undefined })
   return entries.filter((e) => !e.parentId || !byId.has(e.parentId)).map(build)
 }
 
@@ -127,14 +188,18 @@ function navTarget(entry) {
 
 function mirrorEntry(ev) {
   if (ev?.type === 'message_end' && ev.message) {
-    const id = `e${++pSeq}`
+    const id = genEntryId()
     const entry = { type: 'message', id, parentId: leafId, timestamp: new Date().toISOString(), message: ev.message }
     treeAdd(entry)
     persist(entry)
     pParent = id
   } else if (ev?.type === 'session_info_changed' && ev.name) {
-    const id = `e${++pSeq}`
-    const entry = { type: 'session_info', id, parentId: leafId, timestamp: new Date().toISOString(), name: ev.name }
+    // pi's appendSessionInfo (core/session-manager.js:914-925) parents at
+    // `this.leafId`, and leafId is null after resetLeaf() — so a rename that
+    // follows a revert-to-root writes an entry with NO parent, exactly like the
+    // navigation marker. Reproduce that or the check tests a shape pi never writes.
+    const id = genEntryId()
+    const entry = { type: 'session_info', id, ...(leafId ? { parentId: leafId } : {}), timestamp: new Date().toISOString(), name: ev.name }
     treeAdd(entry)
     persist(entry)
     pParent = id
@@ -414,6 +479,7 @@ async function run(text, images) {
 }
 
 const rl = readline.createInterface({ input: process.stdin })
+loadTreeFromFile()
 
 // What the bridge actually ASKED pi, line by line. Some behaviors are invisible
 // in the SSE stream (a rename is an RPC the bridge must send, not an event it
@@ -430,7 +496,14 @@ const fakeRename = (name) => {
   const trimmed = String(name ?? '').trim()
   if (!trimmed) return false
   sessionName = trimmed
-  out({ type: 'session_info_changed', name: sessionName })
+  // pi's setSessionName (core/agent-session.js:3212-3217) appends the entry via
+  // sessionManager.appendSessionInfo and THEN emits session_info_changed. Model the
+  // append here, at the leaf, so the event stays a pure notification.
+  const id = genEntryId()
+  const entry = { type: 'session_info', id, ...(leafId ? { parentId: leafId } : {}), timestamp: new Date().toISOString(), name: sessionName }
+  treeAdd(entry)
+  persist(entry)
+  emitOnly({ type: 'session_info_changed', name: sessionName })
   return true
 }
 
@@ -481,10 +554,22 @@ rl.on('line', async (line) => {
       const entry = byId.get(target)
       if (!entry) return fail(cmd, `Entry ${target} not found in the session tree`)
       const t = navTarget(entry)
+      // pi's navigateTree (core/agent-session.js:3232) MOVES THE LEAF POINTER to
+      // the selection target (`sessionManager.branch(newLeafId)` / `resetLeaf()`),
+      // and the extension's marker is then appended as a CHILD of that new leaf —
+      // so the marker IS the leaf, parented at the target. Re-pointing the pointer
+      // here is what makes a resumed fake child agree with pi about which branch is
+      // active; without it get_tree kept answering the abandoned chain.
+      if (t.leafTargetId === null) {
+        leafId = null
+      } else {
+        const target = byId.get(t.leafTargetId)
+        if (target) leafId = target.id
+      }
       const marker = {
         type: 'custom',
         customType: 'tau:navigate-tree',
-        id: `nav${++pSeq}`,
+        id: genEntryId(),
         parentId: t.leafTargetId,
         timestamp: new Date().toISOString(),
         targetId: entry.id,
@@ -543,7 +628,19 @@ rl.on('line', async (line) => {
     // pi aborts the run and leaves the queues armed
     aborted = true
     resp(cmd)
+  } else if (cmd.type === 'get_entries') {
+    // pi's get_entries (modes/rpc/rpc-mode.js:503): the WHOLE entry list (header
+    // excluded) plus the leaf. tau's navigateTree uses this rather than get_tree,
+    // and pi-web's fork path must too — a resumed child's leaf can name an entry
+    // whose parents are not in the nested tree it was given, so walking the tree
+    // yields one entry while the flat list resolves the real chain.
+    resp(cmd, { entries: entries.filter((e) => e.type !== 'session'), leafId })
   } else if (cmd.type === 'get_tree') {
+    // pi's getTree() returns NESTED nodes ({entry, children, label}) — tau's
+    // flattenTree() walks `children` and IGNORES any node it cannot reach from a
+    // root. Returning the flat entry list here made every message look like a root
+    // of its own, so pathFromRoot(leaf) resolved to ONE entry and a fork of a live
+    // session copied almost nothing.
     resp(cmd, { leafId, tree: treeOf() })
   } else if (cmd.type === 'get_commands') {
     // tau refuses to navigate unless it can see that its extension command is

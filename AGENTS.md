@@ -74,17 +74,37 @@ this file is what matters when you edit the bridge.
   LAST frame is blind: the `toolResult` `message_end` re-complete fires *after*
   `tool_execution_end` and heals a blanked field, so the check demands text on
   every `completed` frame — that is the only way a live-path regression shows up.
-- **Fork is a FILE operation, never pi's `fork`/`clone` RPC.** pi's runtime fork
-  REBINDS the live child to the new transcript — right for the TUI, which switches
-  into the fork, wrong here, where the old tab keeps its uuid and would go on
-  writing the NEW file. So `POST /oc/session/{id}/fork` writes the fork itself in
-  pi's shape (`<ts>_<uuidv7>.jsonl`, `wx`, header `parentSession: <source>`),
-  copying only the **leaf chain** (a reverted-away branch must not come back to
-  life) and only entries strictly **before** the picked message (the webui's
-  contract, pi's `position:"before"`). The bridge titles it `"<parent> (fork #N)"`
-  with a `session_info` entry — which also marks it named, so the auto-tiler
-  leaves it alone — and spawns NO child: the new tab resumes it cold, so its public
-  id is the uuid from byte one. Whether the forking tab should *become* the fork is
+- **Fork is a FILE operation, never pi's `fork`/`clone` RPC, and it copies the
+  WHOLE transcript.** pi's runtime fork REBINDS the live child to the new
+  transcript — right for the TUI, which switches into the fork, wrong here, where
+  the old tab keeps its uuid and would go on writing the NEW file. So
+  `POST /oc/session/{id}/fork` writes the fork itself in pi's shape
+  (`<ts>_<uuidv7>.jsonl`, `wx`, header `parentSession: <source>`), spawning NO
+  child: the new tab resumes it cold, so its public id is the uuid from byte one,
+  and `/fork` is deliberately NOT in `RESUME_ON_POST` — resuming first pays a spawn
+  and hands back a tree holding only what that child appended since it resumed. It
+  copies **every non-header entry**, like pi's own `forkFrom`, plus a live child's
+  not-yet-written ones via `get_entries` (`modes/rpc/rpc-mode.js:503`, never
+  `get_tree`) — never a chain walk. A chain-based fork was the reported bug: revert
+  to the FIRST user message and pi's navigation marker becomes an orphan ROOT
+  (`resetLeaf()` then `appendCustomEntry` parents at `leafId = null`), so the
+  "active path" is ONE entry, the copy is two rows, and the row reads "0 msgs".
+  Whether to copy is a FILE question; only *which message* is a chain question
+  (`position:"before"`, entries strictly before the picked one).
+- **A transcript ending at an entry with no parent projects ZERO messages — in pi
+  itself.** `_buildIndex` (core/session-manager.js:732) sets `leafId` to the LAST
+  non-header entry and `buildSessionPath` (124-143) walks parents, stopping at the
+  first `parentId == null`. So the fork route must REFUSE such a source (502 quoting
+  pi's own reason) rather than write an unreadable session — pi's own CLI fork of
+  that file is blank too, so it is not ours to paper over by truncating history.
+  Entry ids are load-bearing for the same reason: pi indexes every entry by
+  `entry.id`, so a fixed id (`id:'forkname'`) or an omitted one makes `parentId`
+  resolve into a cycle — and pi's `buildSessionPath` has NO cycle guard while our
+  `leafChain` has a seen-set, which is why the bridge reported "fine" and the UI
+  drew the new-session page. Use `freshEntryId()` for anything we append behind a
+  child's back (`forkTranscript`, `appendSessionInfo`). The bridge titles the fork
+  `"<parent> (fork #N)"` with a `session_info` entry — which also marks it named, so
+  the auto-tiler leaves it alone. Whether the forking tab should *become* the fork is
   a separate, webui-side question: `tabs.rekey(oldId, next)` already retargets a tab
   in place, so a swap costs only a child close+resume; nothing in the bridge blocks
   it. `web/.testbin/fork-check.mjs` holds the invariants, including that the parent
