@@ -58,7 +58,7 @@ function writeSession(file, id, text) {
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'piweb-del-'))
 const SDIR = path.join(scratch, 'sessions')
 const TRASH = path.join(scratch, 'sessions-trash')
-const META = path.join(WEB, '.meta.json') // pi-web's sidecar (gitignored, ephemeral)
+const META = path.join(scratch, '.meta.json') // pi-web's sidecar, in its --dir
 
 const A = '01aa0000-0000-7000-8000-00000000000a'
 const B = '01bb0000-0000-7000-8000-00000000000b'
