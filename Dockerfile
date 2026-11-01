@@ -28,7 +28,12 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.3.0
 # Needs `pi` on PATH (above) and Node >=22.19 (image is 24).
 RUN npm install -g --ignore-scripts pi-tau-web-server@1.1.8
 
+# The bridge is split: pi-web.mjs is the entry and web/lib/*.mjs its modules.
+# Keep the entry at /app/pi-web.mjs — the path is load-bearing (compose
+# entrypoint, the checks' PI_WEB_SCRIPT default, and config.mjs derives its
+# defaults from the entry's directory). Any edit under web/ needs --build.
 COPY web/pi-web.mjs /app/pi-web.mjs
+COPY web/lib /app/lib/
 RUN chown -R node:node /app
 # pi-web imports tau's session manager as a library. ESM can't resolve a global
 # npm install, so symlink it into /app/node_modules (its own deps resolve via
