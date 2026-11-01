@@ -186,6 +186,24 @@ this file is what matters when you edit the bridge.
   and the agent's own `pi` child hangs off it, and `pkill -f "<pat>"` also
   matches the tool's own `bash -c` argv — both have killed live sessions.
 
+- **The file browser never escapes its ceiling.** `GET /oc/fs/{list,file,find,status,diff}`
+  is the webui's Files drawer: read-only, rooted at the **session's** cwd (the
+  caller passes `liveCwd()`'s value, never a header cwd) and bounded above by
+  `PI_CWD` — so one drawer serves N workspaces. The containment rule is what
+  stands between these routes and an arbitrary-read endpoint: realpath both sides
+  and reject the escape (`..`, absolute paths, and **symlinks** pointing out are
+  403s naming the ceiling; an escaping link is still *listed* with `escapes:true`
+  so the drawer greys it rather than pretending it is absent), `find` searches
+  NAMES and never walks a link, and a repo whose top sits above the ceiling
+  reports `repo:true` but cuts its dirty set at the ceiling (`scoped`/`omitted`)
+  instead of naming files it may not read. Do NOT route the drawer through
+  `/oc/file/content`, which takes an absolute path with no containment because it
+  exists to read a before-image the transcript already named. And git here is
+  READ-ONLY (`status`/`diff HEAD`/`show` — never `add`/`stash`/`checkout`, and
+  `GIT_OPTIONAL_LOCKS=0` because plain `git status` rewrites `.git/index` in a
+  worktree another agent is editing). Hold: `fsbrowse-check.mjs` (60 assertions,
+  own ports 8136/8137) and `fsbox-check.mjs` (rendered, optional, 8139).
+
 ## Checks
 
 ```bash
