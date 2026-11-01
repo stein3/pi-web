@@ -2151,7 +2151,10 @@ function workspaceChips() {
 }
 
 // --- star / tag sidecar (same idea as nopencode's webui.db smeta) -----------
-const META_FILE = path.join(HERE, '.meta.json')
+// Lives in the agent dir, NOT next to pi-web.mjs: in the container the script
+// sits at /app (ephemeral layer — every rebuild/recreate wipes it, taking every
+// star and tag with it), while the agent dir is the bind mount that survives.
+const META_FILE = path.join(PI_AGENT_DIR, '.meta.json')
 function loadMeta() {
   try {
     return JSON.parse(fs.readFileSync(META_FILE, 'utf8'))
@@ -2530,7 +2533,7 @@ const STATE_RANK = { loaded: 0, sleeping: 1, unloaded: 2 }
 // only signal available. A false negative here costs a model nobody would pick.
 const EMBEDDING_RE = /embed|rerank/i
 const storeCache = { mtime: 0, providers: [] }
-const modelsJsonCache = { mtime: 0, overrides: {} }
+const modelsJsonCache = { mtime: 0, overrides: {}, defs: [] }
 let routerCache = { at: 0, base: '', models: [] }
 
 function readJson(p) {
@@ -2578,23 +2581,53 @@ function thinkingVariants(m) {
  * the same override the child will actually run under, or the webui advertises a
  * thinking ladder pi ignores (or hides one it honors).
  */
-function modelsJsonOverrides(agentDir) {
+function readModelsJson(agentDir) {
   const file = path.join(agentDir, 'models.json')
   let st
   try {
     st = fs.statSync(file)
   } catch {
-    return {}
+    return { mtimeMs: 0, overrides: {}, defs: [] }
   }
-  if (modelsJsonCache.mtime === st.mtimeMs) return modelsJsonCache.overrides
+  if (modelsJsonCache.mtime === st.mtimeMs) {
+    return { mtimeMs: st.mtimeMs, overrides: modelsJsonCache.overrides, defs: modelsJsonCache.defs }
+  }
   const raw = readJson(file) ?? {}
-  const out = {}
+  const out = { overrides: {}, defs: [] }
   for (const [pid, entry] of Object.entries(raw?.providers ?? {})) {
-    if (entry?.modelOverrides) out[pid] = entry.modelOverrides
+    if (entry?.modelOverrides) out.overrides[pid] = entry.modelOverrides
+    // Full provider definitions point at a baseUrl AND list models: that is a
+    // provider pi itself composes (strata, opencode-go), so the picker gets a row.
+    if (Array.isArray(entry?.models) && entry.models.length) out.defs.push({ id: pid, entry })
   }
   modelsJsonCache.mtime = st.mtimeMs
-  modelsJsonCache.overrides = out
-  return out
+  modelsJsonCache.overrides = out.overrides
+  modelsJsonCache.defs = out.defs
+  return { mtimeMs: st.mtimeMs, overrides: out.overrides, defs: out.defs }
+}
+
+function modelsJsonOverrides(agentDir) {
+  return readModelsJson(agentDir).overrides
+}
+
+/** A store row (or models.json definition) shaped how the webui picker reads models. */
+function pickerModel(m, ov = {}) {
+  // pi merges a map, it does not replace it (applyModelOverride).
+  const eff = {
+    ...m,
+    ...(ov.reasoning === undefined ? {} : { reasoning: ov.reasoning }),
+    ...(ov.thinkingLevelMap || m.thinkingLevelMap
+      ? { thinkingLevelMap: { ...(m.thinkingLevelMap ?? {}), ...(ov.thinkingLevelMap ?? {}) } }
+      : {}),
+  }
+  const variants = thinkingVariants(eff)
+  return {
+    id: m.id,
+    name: m.name ?? m.id,
+    limit: { context: m.contextWindow ?? 0, output: m.maxTokens ?? 0 },
+    ...(eff.reasoning === undefined ? {} : { reasoning: !!eff.reasoning }),
+    ...(variants ? { variants } : {}),
+  }
 }
 
 function storeProviders() {
@@ -2605,9 +2638,10 @@ function storeProviders() {
   } catch {
     return []
   }
-  if (storeCache.mtime === st.mtimeMs) return storeCache.providers
+  const mj = readModelsJson(PI_AGENT_DIR)
+  const cacheKey = `${st.mtimeMs}:${mj.mtimeMs}`
+  if (storeCache.mtime === cacheKey) return storeCache.providers
   const raw = readJson(file) ?? {}
-  const overrides = modelsJsonOverrides(PI_AGENT_DIR)
   const providers = []
   for (const [pid, entry] of Object.entries(raw)) {
     const models = {}
@@ -2615,30 +2649,101 @@ function storeProviders() {
     for (const m of entry?.models ?? []) {
       if (!m?.id || m.type) continue // typed sections (vision) are not chat models
       if (!routerBase && m.baseUrl) routerBase = String(m.baseUrl).replace(/\/v1\/?$/, '')
-      const ov = overrides[pid]?.[m.id] ?? {}
-      // pi merges a map, it does not replace it (applyModelOverride).
-      const eff = {
-        ...m,
-        ...(ov.reasoning === undefined ? {} : { reasoning: ov.reasoning }),
-        ...(ov.thinkingLevelMap || m.thinkingLevelMap
-          ? { thinkingLevelMap: { ...(m.thinkingLevelMap ?? {}), ...(ov.thinkingLevelMap ?? {}) } }
-          : {}),
-      }
-      models[m.id] = {
-        id: m.id,
-        name: m.name ?? m.id,
-        limit: { context: m.contextWindow ?? 0, output: m.maxTokens ?? 0 },
-        ...(eff.reasoning === undefined ? {} : { reasoning: !!eff.reasoning }),
-        ...(thinkingVariants(eff) ? { variants: thinkingVariants(eff) } : {}),
-      }
+      models[m.id] = pickerModel(m, mj.overrides[pid]?.[m.id])
     }
     if (Object.keys(models).length) providers.push({ id: pid, name: pid, models, routerBase })
   }
-  storeCache.mtime = st.mtimeMs
+  // Providers a models.json definition names but the store cache never heard of:
+  // the store is a cache pi's own providers rewrite (llama.cpp, lemonade), so a
+  // hand-defined provider ("strata") or a cloud one ("opencode-go") existed only
+  // in the config layer and the picker showed the store's provider instead.
+  for (const def of mj.defs) {
+    const existing = providers.find((p) => p.id === def.id)
+    if (existing) continue
+    const models = {}
+    let routerBase = ''
+    for (const m of def.entry.models) {
+      if (!m?.id || m.type) continue
+      if (!routerBase && m.baseUrl) routerBase = String(m.baseUrl).replace(/\/v1\/?$/, '')
+      models[m.id] = pickerModel(m, mj.overrides[def.id]?.[m.id])
+    }
+    if (Object.keys(models).length) providers.push({ id: def.id, name: def.id, models, routerBase })
+  }
+  storeCache.mtime = cacheKey
   storeCache.providers = providers
   return providers
 }
 
+// ---------------------------------------------------------------------------
+// Picker filters — picker.json decides what the picker SHOWS.
+//
+// Neither layer a bridge may edit survives a hand-managed "models I do not
+// want" list: models-store.json is a CACHE pi's own providers rewrite, and
+// models.json is the layer pi composes (arbitrary keys are not pi config). The
+// picker extension's config file is the one place already owned by the picker:
+//
+//   { "mode": "all",
+//     "hidden": ["deepseek-v4*", "grok*", "mimo-v2.5*", "*Contributor"] }
+//
+// `hidden` — glob patterns matched against the bare model id AND
+// "provider/model", case-insensitively (ids are lowercase but a shorthand like
+// `*Contributor` names the display word, not the id). `*` does not cross a "/"
+// inside the pattern; append the prefixed form to cover a whole provider.
+// ---------------------------------------------------------------------------
+
+const pickerConfigCache = { mtimeMs: 0, config: {} }
+
+function pickerConfig() {
+  const file = path.join(PI_AGENT_DIR, 'picker.json')
+  let st
+  try {
+    st = fs.statSync(file)
+  } catch {
+    return {}
+  }
+  if (pickerConfigCache.mtimeMs === st.mtimeMs) return pickerConfigCache.config
+  const config = readJson(file) ?? {}
+  pickerConfigCache.mtimeMs = st.mtimeMs
+  pickerConfigCache.config = config
+  return config
+}
+
+const globs = new Map()
+
+function globHit(pattern, s) {
+  let re = globs.get(pattern)
+  if (!re) {
+    // case-insensitive: model ids are lowercase but a shorthand like
+    // `*Contributor` names the display word, not the id
+    re = new RegExp(
+      '^' +
+        pattern.replace(/[.+^$(){}[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '.') +
+        '$',
+      'i',
+    )
+    globs.set(pattern, re)
+  }
+  return re.test(s)
+}
+
+function isHiddenModel(pid, id) {
+  const hidden = pickerConfig().hidden ?? []
+  if (!Array.isArray(hidden) || !hidden.length) return false
+  for (const pattern of hidden) {
+    if (typeof pattern !== 'string' || !pattern) continue
+    if (globHit(pattern, id) || globHit(pattern, `${pid}/${id}`)) return true
+  }
+  return false
+}
+
+function applyPickerFilters(rows) {
+  for (const p of rows) {
+    for (const id of Object.keys(p.models ?? {})) {
+      if (isHiddenModel(p.id, id)) delete p.models[id]
+    }
+  }
+  return rows
+}
 // ---------------------------------------------------------------------------
 // Engine telemetry — what the thinking box (and the compaction box) renders.
 //
@@ -2892,19 +2997,20 @@ function sortLoadedFirst(p) {
   p.models = Object.fromEntries(models.map((m) => [m.id, m]))
 }
 
+/** A line of pi's --list-models output: "1.0M" / "131.1K" -> 1000000 / 131000. */
+function listModelsNum(s) {
+  const m = String(s ?? '').match(/^([\d.]+)\s*([KM])?$/i)
+  if (!m) return 0
+  return Math.round(Number(m[1]) * (m[2]?.toUpperCase() === 'M' ? 1e6 : m[2] ? 1e3 : 1))
+}
+
 /** tau's `pi --list-models` mapped into the webui's provider shape. */
 async function cliProviders() {
-  // pi prints context as "1.0M" / "131.1K" — InfoPanel expects a number.
-  const toNum = (s) => {
-    const m = String(s ?? '').match(/^([\d.]+)\s*([KM])?$/i)
-    if (!m) return 0
-    return Math.round(Number(m[1]) * (m[2]?.toUpperCase() === 'M' ? 1e6 : m[2] ? 1e3 : 1))
-  }
   const byProv = new Map()
   for (const m of await getAvailableModels().catch(() => [])) {
     const p = m.provider || 'unknown'
     if (!byProv.has(p)) byProv.set(p, { id: p, name: p, models: {} })
-    byProv.get(p).models[m.id] = { id: m.id, name: m.id, limit: { context: toNum(m.context) } }
+    byProv.get(p).models[m.id] = { id: m.id, name: m.id, limit: { context: listModelsNum(m.context), output: listModelsNum(m.maxOutput) } }
   }
   return [...byProv.values()]
 }
@@ -2927,7 +3033,35 @@ async function modelProviders() {
       }
     }
   }
-  if (!Object.values(providers).some((p) => Object.keys(p.models).length)) return cliProviders()
+  // Builtin-only providers. The store is a CACHE pi's own providers rewrite and
+  // pi's builtin catalogs (opencode, opencode-go, cloud vendors whose keys are
+  // set) never write sections into it — so until now a provider pi could chat
+  // with (and the webui could bridge fine) was invisible to the picker whenever
+  // no models.json definition described it. The child is the only truthful
+  // source for the composed list: tau's pi --list-models reports AVAILABLE
+  // models only (auth-gated, so unconfigured vendors never leak in), cached 5
+  // min on tau's side. Fill gaps, never clobber: a row from the store or a
+  // models.json definition keeps its variants/ladders — the merged entry only
+  // adds model ids the config layers do not know.
+  for (const m of await getAvailableModels().catch(() => [])) {
+    if (!m?.provider || !m?.id) continue
+    const p = providers.find((r) => r.id === m.provider)
+    if (p) {
+      if (!p.models[m.id])
+        p.models[m.id] = { id: m.id, name: m.id, limit: { context: listModelsNum(m.context), output: listModelsNum(m.maxOutput) }, ...(m.thinking ? { reasoning: true } : {}) }
+      continue
+    }
+    const row = { id: m.provider, name: m.provider, models: {} }
+    row.models[m.id] = { id: m.id, name: m.id, limit: { context: listModelsNum(m.context), output: listModelsNum(m.maxOutput) }, ...(m.thinking ? { reasoning: true } : {}) }
+    providers.push(row)
+  }
+  if (!Object.values(providers).some((p) => Object.keys(p.models).length)) {
+    return applyPickerFilters(cliProviders())
+  }
+  // The filter pass runs LAST over the merged catalogue but ahead of the
+  // shaper, over the response rows only — engine telemetry keeps reading
+  // unfiltered storeProviders(), whose id table the filter must not disturb.
+  applyPickerFilters(providers)
   for (const p of providers) {
     delete p.routerBase
     if (Object.keys(p.models).length) sortLoadedFirst(p)
