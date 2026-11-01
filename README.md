@@ -1,6 +1,7 @@
 # pi-web
 
-One file — [`web/pi-web.mjs`](web/pi-web.mjs) — that turns pi's RPC mode into an
+One entry — [`web/pi-web.mjs`](web/pi-web.mjs), with its modules in
+[`web/lib/`](web/lib) — that turns pi's RPC mode into an
 opencode-shaped HTTP + SSE backend, so a browser client can drive a real
 `pi --mode rpc` child: sessions, prompts, mid-turn steering, tool rows with
 inline diffs, compaction, and history.

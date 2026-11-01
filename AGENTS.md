@@ -1,9 +1,21 @@
 # AGENTS.md
 
-`web/pi-web.mjs` is a single-file HTTP/SSE bridge: it answers the opencode-shaped
-API the nopencode webui speaks, and drives `pi --mode rpc` children through
+`web/pi-web.mjs` is the entry of the HTTP/SSE bridge (split out of a single file
+2026-11-02; modules in `web/lib/*.mjs`): it answers the opencode-shaped API the
+nopencode webui speaks, and drives `pi --mode rpc` children through
 `pi-tau-web-server`'s `LiveSessionManager`. `README.md` is the human-facing doc;
 this file is what matters when you edit the bridge.
+
+Module map (the function names referenced below are unchanged and kept their
+meaning): `config` argv/env — evaluates before tau always, `tau` tau's surface +
+session trash, `registry` live children/aliases/reaper, `ids` derived ids,
+`transcript` JSONL reads + file listing cache, `fork`, `compaction` (rows +
+wait machinery), `translate` pi→opencode messages, `titles`, `live-events`,
+`notify` emitFor/session.updated gating, `projection` session + history rows,
+`sessions` cold-resume glue (`sessionFor`, `autoName`), `models`, `engine`
+telemetry, `fsbrowse`, `http`, `router` (`handleApi`/`handleFork`). Bodies were
+moved verbatim; the entry keeps boot + the `liveManager.addClient` wiring. The
+`<titler>` block lives in `lib/titles.mjs` (titlefill-check extracts it).
 
 ## Invariants — each one broke something before
 
@@ -254,7 +266,8 @@ checkout.
 
 ## Deploy
 
-Any edit to `web/pi-web.mjs` needs a rebuild — it is baked into the image:
+Any edit under `web/` (the entry `web/pi-web.mjs` or `web/lib/*.mjs`) needs a
+rebuild — the tree is baked into the image:
 `sudo docker compose up -d --build pi-web`. pi extensions live in the
 bind-mounted agent dir, so they need only a `restart` (new RPC children pick them
 up at `session_start`).
