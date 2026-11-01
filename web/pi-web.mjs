@@ -2355,13 +2355,6 @@ function readBody(req) {
 }
 
 function serveStatic(req, res, pathname) {
-  // The shared dist is built with vite `base: '/webui/'` (nopencode's chatserver
-  // serves it under that prefix). pi-web serves the same folder at `/`, so accept
-  // both spellings — the built index.html and every dynamic import/chunk inside
-  // the JS ask for `/webui/assets/...`, and 404ing those blanks the UI.
-  if (pathname === '/webui' || pathname.startsWith('/webui/')) {
-    pathname = pathname.slice('/webui'.length) || '/'
-  }
   let p = pathname === '/' ? '/index.html' : pathname
   if (!path.extname(p)) p = '/index.html'
   let full
