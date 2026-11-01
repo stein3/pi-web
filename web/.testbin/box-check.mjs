@@ -175,19 +175,28 @@ async function openSession(title) {
   const sid = r.json?.id
   check(!!sid, `PREMISE: session created (${sid})`)
   await req(`/oc/session/${sid}/prompt_async`, { method: 'POST', body: { parts: [{ type: 'text', text: 'stream me' }] } })
-  await sleep(2500) // the turn finishes and the transcript exists
+  // the turn must be DONE and its transcript written BEFORE the page loads:
+  // the sidebar fetches /api/history/sessions once (a row that appears later
+  // is never seen), and the engine-box cases fire /summarize from a settled
+  // idle — a still-busy turn holds it and the engine call starts late. Poll
+  // the real observables instead of guessing at turn duration (was sleep(2500)).
+  await e2e.poll(
+    () =>
+      Promise.all([req('/api/history/sessions'), req('/oc/session/status')]).then(
+        ([h, st]) => (h.json ?? []).some((s) => s.id === sid) && st.json?.[sid]?.type === 'idle',
+      ),
+    10000,
+  )
   await page.goto(BASE + '/', { waitUntil: 'domcontentloaded', timeout: 20000 })
-  await sleep(1500)
   const mounted = await e2e.poll(() => page.locator('body').innerText().then((t) => t.length > 40), 8000)
   check(mounted, 'PREMISE: the app mounted (text drew, not a blank page)')
   const row = page.locator('aside button.item, .sidebar button.item').first()
   const found = await e2e.poll(() => row.count().then((n) => n > 0), 8000)
   check(found, 'PREMISE: the session is listed in the sidebar')
   await row.click().catch(() => {})
-  await sleep(1500)
   const composer = await e2e.poll(() => page.locator('textarea:visible, [contenteditable="true"]:visible').count().then((n) => n > 0), 6000)
   check(composer, 'PREMISE: the tab opened with a composer')
-  const turn = await page.evaluate(() => document.body.innerText.includes('Hello streamed world.'))
+  const turn = await e2e.poll(() => page.evaluate(() => document.body.innerText.includes('Hello streamed world.')), 6000)
   check(turn, 'PREMISE: the opened tab shows the streamed turn')
   return sid
 }
@@ -274,8 +283,12 @@ try {
     await page.screenshot({ path: `${shots}/box-running.png` })
     const done = await e2e.poll(async () => (await boxState()).row, 12000)
     check(done, 'the committed summary became a row box')
+    // the swap running->row is two DOM updates; a single sample right after the
+    // row appears raced the render (it caught both boxes for one tick). Bounded
+    // wait for the settled state instead.
+    const settled = await e2e.poll(async () => (!(await boxState()).running ? true : null), 4000)
+    check(!!settled, 'the running box is gone once the summary lands')
     const r = await boxState()
-    check(!r.running, 'the running box is gone once the summary lands')
     check(
       /Context compacted/.test(r.rowText) && /42,000 tokens summarised/.test(r.rowText) && /→ 900/.test(r.rowText),
       `the head line carries the counts from state (${JSON.stringify(r.rowText)})`,

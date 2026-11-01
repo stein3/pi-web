@@ -372,7 +372,9 @@ async function caseSlow() {
     const dt = Date.now() - t0
     check(r.status === 200 && r.json?.started === true && r.json?.pending === true, `answered before the ceiling — ${r.status} ${String(r.body).slice(0, 60)}`)
     check(dt < 1000, `answered in ${dt}ms (< the ${1200}ms summary), so no edge timeout`)
-    await sleep(1500) // the RPC + compaction_end land later
+    // the RPC + compaction_end land later — bounded wait (same 1500ms
+    // deadline as the old fixed sleep, but returns the moment it lands)
+    for (let i = 0; i < 10 && ofType('session.next.compaction.ended').length < 1; i++) await sleep(150)
     check(ofType('session.next.compaction.ended').length === 1, 'compaction.ended arrives after the answer')
     check(ofType('session.idle').length >= 1, 'session.idle closes the UI without any HTTP response')
     const st = webuiState(events)
@@ -392,7 +394,7 @@ async function caseSlowFail() {
     const sid = await newSession('compact-slowfail')
     const r = await summarize(sid)
     check(r.status === 200 && r.json?.pending === true, `answered pending (${r.status})`)
-    await sleep(1500)
+    for (let i = 0; i < 10 && ofType('session.error').length < 1; i++) await sleep(150) // bounded, same 1500ms deadline
     const errs = ofType('session.error')
     check(errs.length === 1, `late failure reaches the client over SSE (${errs.length} session.error)`)
     check(
@@ -455,8 +457,12 @@ async function caseSendDuringCompaction() {
     const dt = Date.now() - t0
     check(p.status === 204, `a send during compaction is not a send failure (${p.status} ${JSON.stringify(p.json?.error ?? p.json ?? '')})`)
     check(dt >= 550, `the bridge HELD the send for the summary (${dt}ms into a 900ms summary)`)
-    await sleep(1400)
-    const rows = await req(`/oc/session/${sid}/message`)
+    let rows
+    for (let i = 0; i < 14; i++) {
+      rows = await req(`/oc/session/${sid}/message`)
+      if (JSON.stringify(rows.json ?? '').includes('queued while summarising')) break
+      await sleep(100)
+    }
     check(
       JSON.stringify(rows.json ?? '').includes('queued while summarising'),
       `the held send ran once the summary landed (${(rows.json ?? []).length} message(s))`,

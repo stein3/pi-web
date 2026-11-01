@@ -286,7 +286,9 @@ async function main() {
   const sid = created.json?.id
   check(!!sid, `PREMISE: session created (${sid})`)
   await req(`/oc/session/${sid}/prompt_async`, { method: 'POST', body: { parts: [{ type: 'text', text: 'stream me' }] } })
-  await sleep(2500)
+  // the transcript must exist before the page loads (the sidebar fetches its
+  // list once) — poll that list, not a guessed turn duration (was sleep(2500))
+  await e2e.poll(() => req('/api/history/sessions').then((r) => (r.json ?? []).some((s) => s.id === sid)), 10000)
 
   page = await browser.newPage({ viewport: { width: 1280, height: 900, deviceScaleFactor: 2 } })
   page.on('pageerror', (e) => perr.push(String(e)))
@@ -294,11 +296,10 @@ async function main() {
     if (m.type() === 'error') perr.push(m.text())
   })
   await page.goto(BASE + '/', { waitUntil: 'domcontentloaded', timeout: 20000 })
-  await sleep(1500)
   const row = page.locator('aside button.item, .sidebar button.item').first()
   check(await e2e.poll(() => row.count().then((n) => n > 0), 8000), 'PREMISE: the session is listed in the sidebar')
   await row.click().catch(() => {})
-  await sleep(1200)
+  await e2e.poll(() => page.locator('button[title^="Toggle the drawer"], button[title^="Toggle file browser"]').count().then((n) => n > 0), 5000)
 
   // 1. one drawer host, two tabs, opened on Files
   await page.click('button[title^="Toggle the drawer"], button[title^="Toggle file browser"]')
@@ -529,7 +530,7 @@ async function main() {
   check(Math.abs(saved - 540) <= 12, 'PREMISE: a distinctive width to survive the reload', String(saved))
 
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 })
-  await sleep(1500)
+  await e2e.poll(() => page.locator('button[title^="Toggle the drawer"]').count().then((n) => n > 0), 5000)
   await page.click('button[title^="Toggle the drawer"]')
   check(await e2e.poll(() => drawerState().then((sq) => sq.open), 5000), 'PREMISE: drawer open after the reload')
   st = await drawerState()

@@ -141,7 +141,9 @@ function collectFrames(probeMs = 90000) {
       } catch {
         /* already closed */
       }
-    }, probeMs)
+    }, probeMs).unref() // a hang-guard for the tap must not hold the process
+    // open for its full 90s after the work is done (it cost the suite ~87s per
+    // run: the check sets process.exitCode and node waits out pending timers)
   })
   return { frames, done, stop }
 }

@@ -210,6 +210,10 @@ this file is what matters when you edit the bridge.
 cd web && npm test
 ```
 
+The suite is the list in `web/.testbin/run-checks.mjs` — one check per LINE, so
+branches adding checks merge their lines side by side instead of rewriting one
+giant chain; `node .testbin/run-checks.mjs <name…>` runs a subset.
+
 Every check is self-contained: it seeds fixtures, spawns `pi-web` against
 `web/.testbin/fake-pi.mjs`, and kills its own child. A check must never depend
 on gitignored data (real transcripts, `config/pi-agent/`) — seed a fixture, or
@@ -217,15 +221,24 @@ prefer one when it happens to exist. `PI_WEB_JS=` / `PI_WEB_SCRIPT=` point the
 same assertions at another build: prove the check **fails** on the pre-fix build
 before believing that it passes. `queue-check`, `ws-check`, `ui-check`,
 `time-check` and `box-check` need a live server / chromium / the sibling checkout
-and exit **2** with a SKIP message when it is missing — never a silent pass. `node
-.testbin/optional.mjs <check>` puts a SKIP-able check in the `&&` chain without
-faking a pass (0 pass / 2 SKIP / anything else fails); `client-check` — the real
+and exit **2** with a SKIP message when it is missing — never a silent pass. The
+runner treats exit 2 as SKIP for `optional: true` entries and as a failure
+otherwise (0 pass / 2 SKIP / anything else fails, and a missing file is a
+failure, never a SKIP); `node .testbin/optional.mjs <check>` wraps one check the
+same way for a one-off run. `client-check` — the real
 webui client, needs `WEBUI_SRC=` — and `box-check` — chromium driving the built
 dist, the only check that asserts a **rendered** box — run that way. Ports come
 from `harness.mjs`
 (`CHECK_PORT` 8126 for the spawned bridge, `ENGINE_PORT` 8127 for a fixture
 server such as `fake-engine.mjs`); two checks sharing one pair back-to-back in a
-single shell can flake on the previous teardown, so never run them concurrently.
+single shell can flake on the previous teardown — so the suite runner gives
+every check its own pair (setting the check's own historical `*_PORT` name to
+it too) and never runs two checks at once; don't run two checks concurrently
+outside it either. Each check runs as its own process group and the runner
+reaps that group when the check ends and on SIGINT/SIGTERM: a run cut short
+must not leave a `pi-web` child holding a port (a leaked compact-check child
+did exactly that, and the next run died on a pre-flight guard instead of
+testing anything).
 
 - **Token fields.** The history projection emits two *different* numbers: `tokens`
   (newest-record context estimate, kept for InfoPanel/Footer) and
