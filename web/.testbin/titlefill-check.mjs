@@ -7,9 +7,10 @@
 // filler" was a 15-phrase allowlist (2026-10-26), so a prompt that opened with
 // "my …" or "I think the …" produced a name that was just the prompt, truncated.
 // That is a property of a pure function, so it gets a pure test: extract the
-// marked block from pi-web.mjs and assert a table. (pi-web.mjs boots a server at
-// import, so `import { autoTitle }` is not available — extraction is the only way
-// to unit-test it without splitting the bridge into modules.)
+// marked block from the build under test and assert a table. The block lives in
+// web/lib/titles.mjs since the bridge was split into modules (a single-file
+// A/B build carries it inline) — extraction keeps this check working against
+// BOTH layouts.
 //
 // Two directions, both required:
 //   - FILLER: the name must not open with junk;
@@ -25,10 +26,18 @@ import { fileURLToPath } from 'node:url'
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 
-const src = fs.readFileSync(PI_WEB, 'utf8')
-const m = src.match(/\/\/ <titler>([\s\S]*?)\/\/ <\/titler>/)
+// The titler block: inline in a single-file build (PI_WEB_JS A/B), or in
+// lib/titles.mjs beside the entry after the split. Try both.
+const block = (p) => {
+  try {
+    return fs.readFileSync(p, 'utf8').match(/\/\/ <titler>([\s\S]*?)\/\/ <\/titler>/)
+  } catch {
+    return null
+  }
+}
+const m = block(PI_WEB) ?? block(path.join(path.dirname(PI_WEB), 'lib', 'titles.mjs'))
 if (!m) {
-  console.log('FAIL no // <titler> … // </titler> block in ' + PI_WEB + ' — the check would assert nothing')
+  console.log('FAIL no // <titler> … // </titler> block in ' + PI_WEB + ' (nor lib/titles.mjs beside it) — the check would assert nothing')
   process.exit(1)
 }
 let titler
