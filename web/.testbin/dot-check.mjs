@@ -43,7 +43,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { WEB } from './harness.mjs'
-import { dropStream, loadWebuiClient, webuiSkip } from './webui-client.mjs'
+import { loadWebuiClient, ui, webuiSkip } from './webui-client.mjs'
 
 const PORT = Number(process.env.CHECK_PORT || 8128)
 const BASE = `http://127.0.0.1:${PORT}`
@@ -56,11 +56,11 @@ const check = (ok, label) => {
   if (!ok) failed++
 }
 
-// Tabs.svelte:64 — verbatim. `class:dirty={t.dirty && !t.busy}` with
-// `.dot.dirty { background: var(--ok) }` IS the green dot; source order gives
-// ask > busy > dirty. Asserting any other predicate would assert a UI that
-// does not exist.
-const dotGreen = (t) => !!t?.dirty && !t?.busy
+// The dot predicate lives in webui-client.mjs's `ui` block, next to the other
+// copied UI predicates (renders/partsOf/thinkingBlock), so every check reads the
+// same contract. dotGreen is ui.dotDirty — Tabs.svelte:64's
+// `class:dirty={t.dirty && !t.busy}`, painted `.dot.dirty { background: var(--ok) }`.
+const dotGreen = ui.dotDirty
 
 function j(p, opts = {}) {
   return new Promise((resolve, reject) => {

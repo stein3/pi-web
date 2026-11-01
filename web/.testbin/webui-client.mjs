@@ -230,6 +230,25 @@ export async function loadWebuiClient(BASE) {
  * asserting a UI that does not exist.
  */
 export const ui = {
+  /**
+   * Tabs.svelte:64 — the tab-bar status dot. Source order is precedence, so
+   * ask > busy > dirty: `busy` is --warn (amber), `dirty && !busy` is --ok
+   * (GREEN), `ask` is --err (red). `dirty` is stores.ts's "refetch pending"
+   * flag, NOT a session status — it renders the in-flight window of a
+   * background GET /message, which is why an unconditional periodic re-pull
+   * looked like an idle session changing state.
+   */
+  dotAsk(t) {
+    return !!t?.ask
+  },
+  dotBusy(t) {
+    return !!t?.busy
+  },
+  /** the green one: `class:dirty={t.dirty && !t.busy}` */
+  dotDirty(t) {
+    return !!t?.dirty && !t?.busy
+  },
+
   /** Transcript.svelte `$: msgs = …filter(...)` */
   renders(m) {
     return (
