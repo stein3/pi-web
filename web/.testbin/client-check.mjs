@@ -169,7 +169,17 @@ async function caseLive() {
   const { seen, unsub } = observe(sid)
 
   await j(`/oc/session/${sid}/prompt_async`, { method: 'POST', body: { parts: [{ type: 'text', text: 'stream me' }] } })
-  await sleep(300) // mid-turn: deltas + 300ms of tool time
+  // Wait for busy by POLLING, not by a fixed sleep. The turn's first frame is
+  // pi's `agent_start` -> the bridge's session.status{type:'busy'} (pi-web.mjs),
+  // which the client turns into tab.busy — but that hop crosses two process
+  // boundaries behind a cold child spawn, so a fixed 300ms was a race: it read
+  // busy=false and failed ~1 run in 5 with nothing wrong in the product.
+  let wentBusy = false
+  for (let i = 0; i < 40 && !wentBusy; i++) {
+    await sleep(50)
+    wentBusy = tabs.snapshot(sid)?.busy === true
+  }
+  await sleep(150) // still mid-turn: deltas + 300ms of tool time
   const midTurn = tabs.snapshot(sid)
   check(midTurn?.busy, 'the tab is busy while the turn runs')
   const reasoning = flat(midTurn).filter(ui.thinkingBlock)
