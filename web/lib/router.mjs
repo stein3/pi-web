@@ -6,7 +6,7 @@ import { PI_CWD } from './config.mjs'
 import { forkCount, forkEntriesFor, forkTranscript } from './fork.mjs'
 import { FS_ROUTES, FsError } from './fsbrowse.mjs'
 import { readBody, sendJson } from './http.mjs'
-import { modelProviders } from './models.mjs'
+import { modelProviders, pickerConfig } from './models.mjs'
 import { emitSessionUpdated } from './notify.mjs'
 import { allSessionMeta, appendSessionInfo, errTiles, loadMeta, metaCache, ocSession, saveMeta, searchSessions, sessionMeta, toHistMsgs, trashSessionFile, workspaceChips } from './projection.mjs'
 import { armSession, entryFor, learnPublicId, live, publicIdsFor, queueView, reapedFile, sessionByAnyId } from './registry.mjs'
@@ -28,14 +28,17 @@ const EMPTY = {
   '/oc/config': {},
 }
 
-// pi's own slash commands (the ones loaded extensions register, e.g.
-// an extension's /model-sync) are only visible to pi, so the palette asked the
-// engine and got [] forever. Query a live pi child over RPC (`get_commands`)
-// instead; pi built-ins stay out because the webui ships web-side twins for
-// those, and both exclusions need UI this server never bridges:
-// tau's navigate command is internal, and ctx.ui.select/confirm dialogs (used
-// by /pick-model) have no client here — the RPC dialog just expires.
-const HIDDEN_COMMANDS = new Set(['tau-tree-navigate', 'pick-model'])
+// pi's own slash commands (the ones loaded extensions register) are only
+// visible to pi, so the palette asked the engine and got [] forever. Query a
+// live pi child over RPC (`get_commands`) instead; pi built-ins stay out
+// because the webui ships web-side twins for those, and both exclusions need
+// UI this server never bridges: tau's navigate command is internal, and
+// commands whose whole body is a ctx.ui.select/confirm dialog have no client
+// here — the RPC dialog just expires. Hide those by adding them to
+// `hiddenCommands` in picker.json.
+const BASE_HIDDEN_COMMANDS = new Set(['tau-tree-navigate'])
+const hiddenCommand = (name) =>
+  BASE_HIDDEN_COMMANDS.has(name) || (pickerConfig().hiddenCommands ?? []).includes(name)
 const commandCache = { at: 0, ttl: 0, data: [] }
 async function engineCommands() {
   if (commandCache.data.length && Date.now() - commandCache.at < commandCache.ttl) return commandCache.data
@@ -45,7 +48,7 @@ async function engineCommands() {
       try {
         const resp = await s.send({ type: 'get_commands' }, { timeoutMs: 8000 })
         for (const c of resp?.data?.commands ?? []) {
-          if (!c?.name || c.source !== 'extension' || HIDDEN_COMMANDS.has(c.name)) continue
+          if (!c?.name || c.source !== 'extension' || hiddenCommand(c.name)) continue
           if (!found.has(c.name)) found.set(c.name, { name: c.name, description: c.description ?? '' })
         }
       } catch {

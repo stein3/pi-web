@@ -186,7 +186,7 @@ function storeProviders() {
 // Neither layer a bridge may edit survives a hand-managed "models I do not
 // want" list: models-store.json is a CACHE pi's own providers rewrite, and
 // models.json is the layer pi composes (arbitrary keys are not pi config). The
-// picker extension's config file is the one place already owned by the picker:
+// picker's own file is the one place already owned by the picker:
 //
 //   { "mode": "all",
 //     "hidden": ["deepseek-v4*", "grok*", "mimo-v2.5*", "*Contributor"] }
@@ -195,6 +195,8 @@ function storeProviders() {
 // "provider/model", case-insensitively (ids are lowercase but a shorthand like
 // `*Contributor` names the display word, not the id). `*` does not cross a "/"
 // inside the pattern; append the prefixed form to cover a whole provider.
+// `hiddenCommands` — extension slash commands to leave out of the palette
+// (the ones whose whole body is a TUI dialog this server cannot bridge).
 // ---------------------------------------------------------------------------
 
 const pickerConfigCache = { mtimeMs: 0, config: {} }
@@ -362,4 +364,4 @@ async function modelProviders() {
   return providers.filter((p) => Object.keys(p.models).length)
 }
 
-export { modelProviders, storeProviders }
+export { modelProviders, storeProviders, pickerConfig }

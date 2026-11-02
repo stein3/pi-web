@@ -122,7 +122,7 @@ try {
   )
 
   // ---- slash command during the run: never queued --------------------------
-  const slash = '/model-sync all'
+  const slash = '/some-extension-command all'
   const rS = await req(`/oc/session/${sid}/command`, { method: 'POST', body: { command: slash.slice(1) } })
   const slashQueued = queuesFor(sid).some((e) => [...(queueOf(e).steering ?? []), ...(queueOf(e).followUp ?? [])].includes(slash))
   check(rS.status === 200 && !slashQueued, `slash command ran without queueing (${rS.status}, queued=${slashQueued})`)

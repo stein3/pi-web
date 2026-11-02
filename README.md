@@ -64,6 +64,10 @@ gitignored here because it holds credentials and transcripts.
   first authed provider.
 - `auth.json` base URLs **must include the scheme** (`http://host:port`) or pi
   exits with `ERR_INVALID_URL` before printing anything.
+- `picker.json` is optional and picker-local: `hidden` holds glob patterns
+  (bare id or `provider/id`, case-insensitive) that are stripped from the
+  catalogue before it reaches the webui, and `hiddenCommands` keeps extension
+  slash commands whose UI is a TUI dialog out of the palette.
 - Provider keys come from the environment (`ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, `GEMINI_API_KEY` — pi's names, not opencode's).
 
