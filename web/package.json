@@ -5,6 +5,9 @@
   "main": "pi-web.mjs",
   "scripts": {
     "start": "node pi-web.mjs",
+    "test:unit": "node --test ../test/unit/*.mjs",
+    "test:integration": "npm run check",
+    "test:all": "npm run test:unit && npm run test:integration",
     "check": "node ../test/run-checks.mjs",
     "test": "npm run check"
   },
