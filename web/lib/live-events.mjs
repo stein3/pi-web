@@ -478,6 +478,10 @@ function emitBlock(tauId, msg, b, i, e) {
     })
   } else if (b.type === 'file') {
     emitFor(tauId, 'message.part.updated', { part: { ...base, type: 'file', url: b.url ?? '', mime: b.mime ?? '', filename: b.filename ?? '' } })
+  } else if (b.type === 'image') {
+    const mime = b.mimeType ?? b.mime ?? 'image/png'
+    const data = b.data ?? b.source?.data ?? ''
+    emitFor(tauId, 'message.part.updated', { part: { ...base, type: 'file', url: `data:${mime};base64,${data}`, mime, filename: b.filename ?? '' } })
   }
 }
 

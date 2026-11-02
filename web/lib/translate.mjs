@@ -129,6 +129,10 @@ function toOcMessage(m, mid, results) {
       })
     } else if (b.type === 'file') {
       parts.push({ id, type: 'file', url: b.url ?? '', mime: b.mime ?? '', filename: b.filename ?? '' })
+    } else if (b.type === 'image') {
+      const mime = b.mimeType ?? b.mime ?? 'image/png'
+      const data = b.data ?? b.source?.data ?? ''
+      parts.push({ id, type: 'file', url: `data:${mime};base64,${data}`, mime, filename: b.filename ?? '' })
     }
   })
 
