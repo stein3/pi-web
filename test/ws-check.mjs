@@ -3,7 +3,7 @@
 // the new-session file picker (chips + path type-ahead → pending tab → real
 // session born with the picked cwd).
 //
-//   BASE_URL=http://127.0.0.1:8126 node .testbin/ws-check.mjs
+//   BASE_URL=http://127.0.0.1:8126 node test/ws-check.mjs
 import path from 'node:path'
 import { loadE2E, browserSkip, shotsDir, REPO } from './harness.mjs'
 

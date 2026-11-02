@@ -21,7 +21,7 @@
  * hand-rolled chromium.launch() renders blank text here) and chromium. Exits 2
  * with a SKIP message when they are missing — never a silent pass.
  *
- *   node .testbin/box-check.mjs
+ *   node test/box-check.mjs
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -29,11 +29,10 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loadE2E, browserSkip, shotsDir, CHECK_PORT, ENGINE_PORT } from './harness.mjs'
+import { loadE2E, browserSkip, shotsDir, CHECK_PORT, ENGINE_PORT, WEB } from './harness.mjs'
 import { startEngine } from './fake-engine.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const WEB = path.resolve(HERE, '..')
 const PORT = CHECK_PORT
 const BASE = `http://127.0.0.1:${PORT}`
 const SUMMARY_MARK = 'BOXCHECK-SUMMARY-MARKER'
@@ -45,7 +44,7 @@ try {
   console.log(e.message)
   process.exit(e.skip ? 2 : 1)
 }
-const WEBUI_DIST = process.env.WEBUI_DIST || path.join(e2e.REPO ?? path.resolve(HERE, '..', '..', '..', 'opencode', 'webui'), 'dist')
+const WEBUI_DIST = process.env.WEBUI_DIST || path.join(e2e.REPO ?? path.resolve(HERE, '..', '..', 'opencode', 'webui'), 'dist')
 if (!fs.existsSync(path.join(WEBUI_DIST, 'index.html'))) {
   console.log(`SKIP: webui dist not found at ${WEBUI_DIST}\n  build it: cd ../opencode/webui && npm run build (or set WEBUI_DIST=)`)
   process.exit(2)

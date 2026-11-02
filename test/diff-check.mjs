@@ -11,17 +11,16 @@
 // agent dir, spawns pi-web on 8127 against the fake pi, asserts, kills its own
 // child by exact PID. Never pattern-kill (see AGENTS.md SELF-KILL-GATE).
 //
-//   node .testbin/diff-check.mjs
+//   node test/diff-check.mjs
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { REPO, REPO_CWD, sessionSlug } from './harness.mjs'
+import { REPO, REPO_CWD, WEB, sessionSlug } from './harness.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const WEB = path.resolve(HERE, '..')
 const PORT = Number(process.env.CHECK_PORT || 8127)
 const BASE = `http://127.0.0.1:${PORT}`
 const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), 'diffcheck-'))

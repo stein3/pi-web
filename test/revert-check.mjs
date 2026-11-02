@@ -20,16 +20,13 @@
 // to exist and why the projection must follow the leaf chain instead of the
 // whole file.
 //
-//   cd web && node .testbin/revert-check.mjs
-//   PI_WEB_JS=<other build> node .testbin/revert-check.mjs   # prove it fails pre-fix
+//   node test/revert-check.mjs
+//   PI_WEB_JS=<other build> node test/revert-check.mjs   # prove it fails pre-fix
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { REPO_CWD, sessionSlug } from './harness.mjs'
+import { REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
 
-const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const TESTBIN = path.join(WEB, '.testbin')
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.REVERT_CHECK_PORT || 8133)
 const BASE = `http://127.0.0.1:${PORT}`

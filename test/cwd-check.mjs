@@ -24,15 +24,13 @@
 // Self-contained: seeds a scratch pi dir, spawns pi-web with its own --cwd, kills
 // the exact PID it started. No model, no real transcripts.
 //
-//   cd web && node .testbin/cwd-check.mjs
-//   PI_WEB_JS=/path/to/pre-fix/pi-web.mjs node .testbin/cwd-check.mjs   # prove it fails
+//   node test/cwd-check.mjs
+//   PI_WEB_JS=/path/to/pre-fix/pi-web.mjs node test/cwd-check.mjs   # prove it fails
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { REPO_CWD, sessionSlug } from './harness.mjs'
+import { REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
 
-const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.CWD_CHECK_PORT || 8135)
 const BASE = `http://127.0.0.1:${PORT}`
@@ -116,7 +114,7 @@ async function main() {
     cwd: WEB,
     env: {
       ...process.env,
-      PATH: `${path.join(WEB, '.testbin')}:${process.env.PATH}`,
+      PATH: `${TESTBIN}:${process.env.PATH}`,
       FAKE_PI_PERSIST: '1',
       FAKE_PI_THINKING: '0',
       PI_WEB_REAP_INTERVAL_MS: '3600000',

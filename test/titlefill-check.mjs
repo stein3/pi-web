@@ -17,13 +17,12 @@
 //   - MANGLE: a first word that IS content must survive (the risk of widening a
 //     strip list is eating the beginning of a real sentence).
 //
-//   cd web && node .testbin/titlefill-check.mjs
-//   PI_WEB_JS=<other build> node .testbin/titlefill-check.mjs   # prove it fails pre-fix
+//   node test/titlefill-check.mjs
+//   PI_WEB_JS=<other build> node test/titlefill-check.mjs   # prove it fails pre-fix
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { WEB } from './harness.mjs'
 
-const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 
 // The titler block: inline in a single-file build (PI_WEB_JS A/B), or in

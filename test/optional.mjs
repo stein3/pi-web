@@ -14,7 +14,7 @@
  *   99      → the check file is missing / the runner died: a check that cannot
  *             even start is a product failure, never a SKIP
  *
- *   node .testbin/optional.mjs client-check.mjs
+ *   node test/optional.mjs client-check.mjs
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const name = process.argv[2]
 if (!name) {
-  console.error('usage: node .testbin/optional.mjs <check.mjs> [args…]')
+  console.error('usage: node test/optional.mjs <check.mjs> [args…]')
   process.exit(99)
 }
 const target = path.join(HERE, name)

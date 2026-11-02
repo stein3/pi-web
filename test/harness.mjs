@@ -9,8 +9,11 @@ import { pathToFileURL } from 'node:url'
 
 const TESTBIN = import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname)
 
-export const WEB = path.resolve(TESTBIN, '..')
-export const REPO = path.resolve(WEB, '..')
+// The checks live at <repo>/test (moved out of web/.testbin), so the bridge dir
+// is a SIBLING of this one, not its parent.
+export { TESTBIN }
+export const REPO = path.resolve(TESTBIN, '..')
+export const WEB = path.join(REPO, 'web')
 
 // screenshots from the browser checks (gitignored: web/.logs)
 export const SHOTS = process.env.SHOTS_DIR || path.join(WEB, '.logs')

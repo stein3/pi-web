@@ -16,17 +16,14 @@
 // child alone. This check asserts exactly that (the "old transcript did not move"
 // assertions are the whole point).
 //
-//   cd web && node .testbin/fork-check.mjs
-//   PI_WEB_JS=<other build> node .testbin/fork-check.mjs   # prove it fails pre-fix
+//   node test/fork-check.mjs
+//   PI_WEB_JS=<other build> node test/fork-check.mjs   # prove it fails pre-fix
 import { spawn } from 'node:child_process'
 import fs, { realpathSync } from 'node:fs'
 import path from 'node:path'
 
 
-import { fileURLToPath } from 'node:url'
-import { REPO_CWD, sessionSlug } from './harness.mjs'
-const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const TESTBIN = path.join(WEB, '.testbin')
+import { REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.FORK_CHECK_PORT || 8134)
 const BASE = `http://127.0.0.1:${PORT}`

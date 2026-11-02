@@ -29,7 +29,7 @@
  * Ports: bridge on CHECK_PORT (8126), fake engine on ENGINE_PORT (8127). The
  * engine is IN-PROCESS (imported), so there is no second PID to kill.
  *
- *   node .testbin/telemetry-check.mjs
+ *   node test/telemetry-check.mjs
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -38,10 +38,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startEngine } from './fake-engine.mjs'
-import { ENGINE_PORT } from './harness.mjs'
+import { ENGINE_PORT, WEB } from './harness.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const WEB = path.resolve(HERE, '..')
 const PORT = Number(process.env.CHECK_PORT || 8126)
 const BASE = `http://127.0.0.1:${PORT}`
 const ENGINE_BASE = `http://127.0.0.1:${ENGINE_PORT}`

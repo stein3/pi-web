@@ -33,15 +33,14 @@
 // makes the ceiling a real test rather than a tautology. No model, no pi child,
 // no real transcripts.
 //
-//   cd web && node .testbin/fsbrowse-check.mjs
-//   PI_WEB_JS=/path/to/pre-fix/pi-web.mjs node .testbin/fsbrowse-check.mjs  # prove it fails
+//   node test/fsbrowse-check.mjs
+//   PI_WEB_JS=/path/to/pre-fix/pi-web.mjs node test/fsbrowse-check.mjs  # prove it fails
 import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { WEB } from './harness.mjs'
 
-const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.FSBROWSE_CHECK_PORT || 8136)
 

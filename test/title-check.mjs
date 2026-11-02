@@ -24,17 +24,14 @@
 // fake pi (which models pi's rename semantics and logs the RPCs it receives),
 // asserts over HTTP + SSE + that log, and kills its own child.
 //
-//   cd web && node .testbin/title-check.mjs
-//   PI_WEB_JS=<other build> node .testbin/title-check.mjs   # prove it fails pre-fix
+//   node test/title-check.mjs
+//   PI_WEB_JS=<other build> node test/title-check.mjs   # prove it fails pre-fix
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { REPO_CWD, sessionSlug } from './harness.mjs'
+import { REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
 
-const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const TESTBIN = path.join(WEB, '.testbin')
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.TITLE_CHECK_PORT || 8127)
 const BASE = `http://127.0.0.1:${PORT}`

@@ -6,7 +6,7 @@
 // `time.created` / `time.completed` / part `state.time` alone.
 //
 //   BASE_URL=http://127.0.0.1:8127 \
-//   PI_CODING_AGENT_DIR=/tmp/piwtest/pi-agent node .testbin/time-check.mjs
+//   PI_CODING_AGENT_DIR=/tmp/piwtest/pi-agent node test/time-check.mjs
 // It reads a REAL pi-web transcript (not the fake pi), so it exits 2 rather than
 // pretending when there is nothing to read. One assertion — 'no message stamped
 // now' — needs a live REAL pi child, because the fake pi answers prompts but

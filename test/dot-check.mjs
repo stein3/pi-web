@@ -33,8 +33,8 @@
  * kills ONLY its own child by exact PID. Needs the sibling
  * webui checkout -> SKIP (exit 2), like client-check / toolmeta-check.
  *
- *   node .testbin/dot-check.mjs
- *   PI_WEB_JS=/app/pi-web.mjs node .testbin/dot-check.mjs   # A/B a build
+ *   node test/dot-check.mjs
+ *   PI_WEB_JS=/app/pi-web.mjs node test/dot-check.mjs   # A/B a build
  *   WEBUI_SRC=../opencode/webui/src                         # the client under test
  */
 import { spawn } from 'node:child_process'
@@ -42,7 +42,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { WEB } from './harness.mjs'
+import { TESTBIN, WEB } from './harness.mjs'
 import { loadWebuiClient, ui, webuiSkip } from './webui-client.mjs'
 
 const PORT = Number(process.env.CHECK_PORT || 8128)
@@ -117,7 +117,7 @@ async function boot(env = {}) {
     cwd: WEB,
     env: {
       ...process.env,
-      PATH: `${path.join(WEB, '.testbin')}:${process.env.PATH}`,
+      PATH: `${TESTBIN}:${process.env.PATH}`,
       PI_CODING_AGENT_DIR: agentDir,
       ...env,
     },

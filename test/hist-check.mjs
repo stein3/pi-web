@@ -15,16 +15,13 @@
 // Self-contained: seeds a scratch pi dir from generated fixtures, spawns pi-web,
 // asserts over the HTTP API, kills its own child (exact PID).
 //
-//   cd web && node .testbin/hist-check.mjs
+//   node test/hist-check.mjs
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { REPO_CWD, sessionSlug } from './harness.mjs'
+import { REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
 
-const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const TESTBIN = path.join(WEB, '.testbin')
 // PI_WEB_JS lets the check run against another copy to prove it fails pre-fix.
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.HIST_CHECK_PORT || 8126)

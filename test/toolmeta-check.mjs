@@ -19,15 +19,15 @@
  * checks) with the fake pi, and kills ONLY its own child by exact PID.
  * Needs the sibling webui checkout → SKIP (exit 2), like client-check.
  *
- *   node .testbin/toolmeta-check.mjs
- *   PI_WEB_JS=/app/pi-web.mjs node .testbin/toolmeta-check.mjs   # A/B a build
+ *   node test/toolmeta-check.mjs
+ *   PI_WEB_JS=/app/pi-web.mjs node test/toolmeta-check.mjs   # A/B a build
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { REPO, WEB } from './harness.mjs'
+import { REPO, TESTBIN, WEB } from './harness.mjs'
 import { loadWebuiClient, webuiSkip } from './webui-client.mjs'
 
 const PORT = Number(process.env.CHECK_PORT || 8129)
@@ -107,7 +107,7 @@ async function boot() {
     cwd: WEB,
     env: {
       ...process.env,
-      PATH: `${path.join(WEB, '.testbin')}:${process.env.PATH}`,
+      PATH: `${TESTBIN}:${process.env.PATH}`,
       PI_CODING_AGENT_DIR: agentDir,
     },
     stdio: ['ignore', 'pipe', 'pipe'],

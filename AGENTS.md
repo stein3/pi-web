@@ -49,7 +49,7 @@ moved verbatim; the entry keeps boot + the `liveManager.addClient` wiring. The
   the nearest existing **ancestor**, then `PI_CWD`, and never to `/` (a transcript
   carried in from another machine must not put a pi child in the root). Never
   rewrite the header — the fallback is a runtime decision, logged once per resume.
-  `web/.testbin/cwd-check.mjs` holds it (9 assertions red before the fix).
+  `test/cwd-check.mjs` holds it (9 assertions red before the fix).
 - **Tool metadata.** The transcript's inline diff comes from
   `state.metadata.filediff.patch`, and the webui shallow-merges parts — so every
   later frame for a tool part must re-supply it. Copy the patch **only**:
@@ -81,7 +81,7 @@ moved verbatim; the entry keeps boot + the `liveManager.addClient` wiring. The
   NAME (`/bash|shell|cmd/`, `/grep|find|search/`), which silently hid the results
   of any other tool while the text rode the wire happily. So the bridge must put
   `textOf(res)` on the live `tool_execution_end` frame AND in the history
-  projection, for names it has never heard of. `web/.testbin/toolout-check.mjs`
+  projection, for names it has never heard of. `test/toolout-check.mjs`
   holds that (fake pi under `FAKE_PI_EXTRA_TOOL=<name>`). Asserting only the
   LAST frame is blind: the `toolResult` `message_end` re-complete fires *after*
   `tool_execution_end` and heals a blanked field, so the check demands text on
@@ -119,7 +119,7 @@ moved verbatim; the entry keeps boot + the `liveManager.addClient` wiring. The
   the auto-tiler leaves it alone. Whether the forking tab should *become* the fork is
   a separate, webui-side question: `tabs.rekey(oldId, next)` already retargets a tab
   in place, so a swap costs only a child close+resume; nothing in the bridge blocks
-  it. `web/.testbin/fork-check.mjs` holds the invariants, including that the parent
+  it. `test/fork-check.mjs` holds the invariants, including that the parent
   transcript does not move when the fork runs a turn.
 - **Compaction is busy, not broken.** pi refuses a prompt outright while it is
   summarising (core/agent-session.js:1620). Forwarding that as a 502 reads as
@@ -176,7 +176,7 @@ moved verbatim; the entry keeps boot + the `liveManager.addClient` wiring. The
   exists). Send `set_model` only when the ref actually changed — pi re-picks a
   thinking level on EVERY `set_model` — and re-assert the session level after a
   switch the bridge itself made; an explicit `/model` POST with no variant is the
-  *clear* (`clearVariant`) and must not re-assert. `web/.testbin/thinking-check.mjs`
+  *clear* (`clearVariant`) and must not re-assert. `test/thinking-check.mjs`
   holds it (plus: pi silently clamps unsupported levels, and the store's
   `compat.supportsReasoningEffort` / `thinkingLevelMap.off` decide whether a level
   reaches the engine at all). `models-store.json` is a CACHE pi's providers rewrite
@@ -219,15 +219,19 @@ moved verbatim; the entry keeps boot + the `liveManager.addClient` wiring. The
 ## Checks
 
 ```bash
-cd web && npm test
+node test/run-checks.mjs    # or: cd web && npm test
 ```
 
-The suite is the list in `web/.testbin/run-checks.mjs` — one check per LINE, so
+The suite is the list in `test/run-checks.mjs` — one check per LINE, so
 branches adding checks merge their lines side by side instead of rewriting one
-giant chain; `node .testbin/run-checks.mjs <name…>` runs a subset.
+giant chain; `node test/run-checks.mjs <name…>` runs a subset. The checks moved
+to `<repo>/test/` (they were `web/.testbin/`), so a check's own dir is NOT the
+bridge's — and no check resolves it either: `harness.mjs` derives `REPO` from
+itself and `WEB` as `<repo>/web`, and every check **imports** `WEB`/`TESTBIN`
+from it. Re-deriving `..` in a check is how a moved suite breaks at HEAD.
 
 Every check is self-contained: it seeds fixtures, spawns `pi-web` against
-`web/.testbin/fake-pi.mjs`, and kills its own child. A check must never depend
+`test/fake-pi.mjs`, and kills its own child. A check must never depend
 on gitignored data (real transcripts, `config/pi-agent/`) — seed a fixture, or
 prefer one when it happens to exist. `PI_WEB_JS=` / `PI_WEB_SCRIPT=` point the
 same assertions at another build: prove the check **fails** on the pre-fix build
@@ -236,7 +240,7 @@ before believing that it passes. `queue-check`, `ws-check`, `ui-check`,
 and exit **2** with a SKIP message when it is missing — never a silent pass. The
 runner treats exit 2 as SKIP for `optional: true` entries and as a failure
 otherwise (0 pass / 2 SKIP / anything else fails, and a missing file is a
-failure, never a SKIP); `node .testbin/optional.mjs <check>` wraps one check the
+failure, never a SKIP); `node test/optional.mjs <check>` wraps one check the
 same way for a one-off run. `client-check` — the real
 webui client, needs `WEBUI_SRC=` — and `box-check` — chromium driving the built
 dist, the only check that asserts a **rendered** box — run that way. Ports come
@@ -258,9 +262,9 @@ testing anything).
   the number the webui sidebar row shows. Sum pi's per-message `usage` only
   (pi has no separate `usage` entries: 85/85 in a real transcript), never
   cache/input, and emit **no key** for an all-zero tally. Verify:
-  `web/.testbin/hist-check.mjs`.
+  `test/hist-check.mjs`.
 
-Paths in tests come from `web/.testbin/harness.mjs` (`REPO`, `SHOTS`,
+Paths in tests come from `test/harness.mjs` (`REPO`, `WEB`, `TESTBIN`, `SHOTS`,
 `E2E_HELPERS`, `CHECK_CWD`, `sessionSlug`); nothing may hard-code a machine's
 checkout.
 

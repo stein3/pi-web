@@ -16,20 +16,17 @@
 //   4. nothing regressed by a restart — the config is re-read from disk.
 //
 // Self-contained: seeds a scratch agent dir, spawns pi-web with its own `pi`
-// shim (PATH beats .testbin's), kills its own child.
+// shim (PATH beats the test dir's), kills its own child.
 //
-//   node .testbin/filter-check.mjs
-//   PI_WEB_JS=<other build> node .testbin/filter-check.mjs   # prove it fails pre-fix
+//   node test/filter-check.mjs
+//   PI_WEB_JS=<other build> node test/filter-check.mjs   # prove it fails pre-fix
 // ---------------------------------------------------------------------------
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { CHECK_PORT, ENGINE_PORT, REPO_CWD } from './harness.mjs'
+import { CHECK_PORT, ENGINE_PORT, REPO_CWD, TESTBIN, WEB } from './harness.mjs'
 
-const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const TESTBIN = path.join(WEB, '.testbin')
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.FILTER_CHECK_PORT || CHECK_PORT)
 const BASE = `http://127.0.0.1:${PORT}`

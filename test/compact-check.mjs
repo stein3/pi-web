@@ -14,16 +14,16 @@
 // Self-contained: boots pi-web on 8127 per case against the fake pi, asserts,
 // kills its OWN child by exact PID (never pattern-kill — SELF-KILL-GATE).
 //
-//   node .testbin/compact-check.mjs
+//   node test/compact-check.mjs
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { WEB } from './harness.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const WEB = path.resolve(HERE, '..')
 const PORT = Number(process.env.CHECK_PORT || 8127)
 const BASE = `http://127.0.0.1:${PORT}`
 

@@ -34,16 +34,13 @@
 // (which logs every RPC it receives and models pi's thinking semantics), asserts
 // over HTTP + that log, and kills its own child.
 //
-//   cd web && node .testbin/thinking-check.mjs
-//   PI_WEB_JS=<other build> node .testbin/thinking-check.mjs   # prove it fails pre-fix
+//   node test/thinking-check.mjs
+//   PI_WEB_JS=<other build> node test/thinking-check.mjs   # prove it fails pre-fix
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { CHECK_PORT, REPO_CWD } from './harness.mjs'
+import { CHECK_PORT, REPO_CWD, TESTBIN, WEB } from './harness.mjs'
 
-const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const TESTBIN = path.join(WEB, '.testbin')
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.THINKING_CHECK_PORT || CHECK_PORT)
 const BASE = `http://127.0.0.1:${PORT}`

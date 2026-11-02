@@ -81,10 +81,10 @@ Tunables (all optional):
 
 ## Checks
 
-`cd web && npm test` runs the four self-contained checks. Each boots its own
-pi-web against `web/.testbin/fake-pi.mjs` — a scripted stand-in that replays pi
-1.3.0's real RPC events, including the result shapes the bridge projects — in a
-scratch agent dir. No browser, no model, no network.
+`node test/run-checks.mjs` (or `cd web && npm test`) runs the self-contained
+checks. Each boots its own pi-web against `test/fake-pi.mjs` — a scripted
+stand-in that replays pi 1.3.0's real RPC events, including the result shapes
+the bridge projects — in a scratch agent dir. No browser, no model, no network.
 
 | check | guards |
 |---|---|
@@ -98,20 +98,21 @@ Operator-local extras — they drive a server you start yourself, and they exit 
 
 ```bash
 # queue-check — ordering the engine owns, HTTP + SSE only
-PATH=$PWD/.testbin:$PATH PI_CODING_AGENT_DIR=/tmp/queue-agent node pi-web.mjs --port 8127 &
-BASE_URL=http://127.0.0.1:8127 node .testbin/queue-check.mjs
+PATH=$PWD/test:$PATH PI_CODING_AGENT_DIR=/tmp/queue-agent node web/pi-web.mjs --port 8127 &
+BASE_URL=http://127.0.0.1:8127 node test/queue-check.mjs
 
 # ws-check / ui-check — the real webui in chromium; needs the sibling checkout's
 # e2e helpers (E2E_HELPERS=<path/to/e2e/helpers/setup.mjs>, CHROMIUM_PATH=…)
-BASE_URL=http://127.0.0.1:8126 node .testbin/ws-check.mjs
+BASE_URL=http://127.0.0.1:8126 node test/ws-check.mjs
 
 # time-check — reads a real transcript, so point it at a scratch agent dir
-PI_CODING_AGENT_DIR=/tmp/piwtest/pi-agent BASE_URL=http://127.0.0.1:8127 node .testbin/time-check.mjs
+PI_CODING_AGENT_DIR=/tmp/piwtest/pi-agent BASE_URL=http://127.0.0.1:8127 node test/time-check.mjs
 ```
 
-Nothing in `web/.testbin/` hard-codes an operator's directory any more: paths
-come from `.testbin/harness.mjs` (`REPO`, `SHOTS`, `E2E_HELPERS`, `sessionSlug`),
-and the fixtures' workspace is this repo unless `CHECK_CWD=` says otherwise.
+Nothing in `test/` hard-codes an operator's directory any more: paths come from
+`test/harness.mjs` (`REPO`, `WEB`, `TESTBIN`, `SHOTS`, `E2E_HELPERS`,
+`sessionSlug`), and the fixtures' workspace is this repo unless `CHECK_CWD=`
+says otherwise.
 
 Every check accepts a build override for A/B against an older tree —
 `PI_WEB_SCRIPT=` (diff/compact), `PI_WEB_JS=` (delete/stream), plus

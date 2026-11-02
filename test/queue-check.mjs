@@ -2,8 +2,8 @@
 // pi. HTTP + SSE only — no browser — because the assertions are about ordering
 // the engine owns, not about how chips look.
 //
-//   PATH=$PWD/.testbin:$PATH PI_CODING_AGENT_DIR=/tmp/queue-agent node pi-web.mjs --port 8127 &
-//   BASE_URL=http://127.0.0.1:8127 node .testbin/queue-check.mjs
+//   PATH=$PWD/test:$PATH PI_CODING_AGENT_DIR=/tmp/queue-agent node web/pi-web.mjs --port 8127 &
+//   BASE_URL=http://127.0.0.1:8127 node test/queue-check.mjs
 import http from 'node:http'
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:8127'

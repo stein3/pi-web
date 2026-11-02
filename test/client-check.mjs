@@ -32,14 +32,14 @@
  * with the fake pi, and kills ONLY its own child by exact PID (SELF-KILL-GATE).
  * Needs the sibling webui checkout → reports SKIP (exit 2) when absent.
  *
- *   node .testbin/client-check.mjs
+ *   node test/client-check.mjs
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { REPO, WEB } from './harness.mjs'
+import { REPO, TESTBIN, WEB } from './harness.mjs'
 import { loadWebuiClient, ui, webuiSkip, dropStream } from './webui-client.mjs'
 
 const PORT = Number(process.env.CHECK_PORT || 8127)
@@ -96,7 +96,7 @@ async function boot(env = {}) {
       cwd: WEB,
       env: {
         ...process.env,
-        PATH: `${path.join(WEB, '.testbin')}:${process.env.PATH}`,
+        PATH: `${TESTBIN}:${process.env.PATH}`,
         PI_CODING_AGENT_DIR: agentDir,
         FAKE_PI_COMPACT: 'ok',
         FAKE_PI_COMPACT_MS: '400',

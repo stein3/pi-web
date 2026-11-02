@@ -5,7 +5,7 @@
   "main": "pi-web.mjs",
   "scripts": {
     "start": "node pi-web.mjs",
-    "check": "node .testbin/run-checks.mjs",
+    "check": "node ../test/run-checks.mjs",
     "test": "npm run check"
   },
   "keywords": [],

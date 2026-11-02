@@ -29,15 +29,15 @@
  * other checks), killed by exact PID. Needs the sibling webui checkout →
  * SKIP (exit 2).
  *
- *   node .testbin/tooltitle-check.mjs
- *   PI_WEB_JS=/path/to/pre-fix/pi-web.mjs node .testbin/tooltitle-check.mjs   # red/green A/B
+ *   node test/tooltitle-check.mjs
+ *   PI_WEB_JS=/path/to/pre-fix/pi-web.mjs node test/tooltitle-check.mjs   # red/green A/B
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { REPO, WEB } from './harness.mjs'
+import { REPO, TESTBIN, WEB } from './harness.mjs'
 import { loadWebuiClient, webuiSkip } from './webui-client.mjs'
 
 const PORT = Number(process.env.TOOLTITLE_CHECK_PORT || 8130)
@@ -147,7 +147,7 @@ function boot() {
     cwd: WEB,
     env: {
       ...process.env,
-      PATH: `${path.join(WEB, '.testbin')}:${process.env.PATH}`,
+      PATH: `${TESTBIN}:${process.env.PATH}`,
       PI_CODING_AGENT_DIR: agentDir,
     },
     stdio: ['ignore', 'pipe', 'pipe'],

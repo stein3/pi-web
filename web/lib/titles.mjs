@@ -1,5 +1,5 @@
 // pi-web/lib/titles.mjs — session/tool titles. The <titler> block is extracted
-// verbatim by .testbin/titlefill-check.mjs: keep the two markers, no I/O inside.
+// verbatim by test/titlefill-check.mjs: keep the two markers, no I/O inside.
 import { textOf } from './content.mjs'
 
 /**
@@ -22,7 +22,7 @@ import { textOf } from './content.mjs'
  * `my …` or `I think the …` must not survive into the sidebar.
  */
 // <titler>
-// Pure text rules; .testbin/titlefill-check.mjs extracts this block verbatim and
+// Pure text rules; test/titlefill-check.mjs extracts this block verbatim and
 // asserts a table, so keep the two markers and add no I/O inside.
 //
 // Leading filler, one rule per source line. Applied at the START only, and

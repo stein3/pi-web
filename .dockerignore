@@ -8,5 +8,4 @@ config
 # global tau install in the image)
 web/node_modules
 web/.logs
-web/.testbin
 web/package-lock.json

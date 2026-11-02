@@ -14,7 +14,7 @@
  *     failure too — a check that cannot even start proved nothing either way;
  *   - required checks may not skip: any nonzero exit is a failure.
  *
- * (The same table for one-off runs is .testbin/optional.mjs.)
+ * (The same table for one-off runs is test/optional.mjs.)
  *
  * Ports: every check gets its OWN CHECK_PORT/ENGINE_PORT pair (see
  * harness.mjs) instead of the chain's shared 8126/8127 — two checks sharing
@@ -32,10 +32,10 @@
  * exactly that), and the next run then dies on a pre-flight guard instead of
  * testing anything. The negative PID is the group THIS spawn created.
  *
- *   node .testbin/run-checks.mjs                  the whole suite
- *   node .testbin/run-checks.mjs hist-check.mjs   just the named checks
- *                                                (substring match, for
- *                                                iterating on one area)
+ *   node test/run-checks.mjs                the whole suite
+ *   node test/run-checks.mjs hist-check.mjs just the named checks
+ *                                           (substring match, for
+ *                                           iterating on one area)
  */
 import fs from 'node:fs'
 import path from 'node:path'

@@ -11,16 +11,13 @@
 // Self-contained: seeds a scratch pi dir from generated fixtures, spawns pi-web
 // against the fake pi, asserts over the HTTP API, then kills the child.
 //
-//   cd web && node .testbin/delete-check.mjs
+//   node test/delete-check.mjs
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { REPO_CWD, sessionSlug } from './harness.mjs'
+import { REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
 
-const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const TESTBIN = path.join(WEB, '.testbin')
 // PI_WEB_JS lets the check run against another copy (e.g. `git show HEAD:...`)
 // to confirm the assertions still catch the old bug.
 const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')

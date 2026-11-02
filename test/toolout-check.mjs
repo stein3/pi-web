@@ -18,16 +18,15 @@
  * it can run beside the other checks), killed by exact PID. No sibling checkout
  * needed: this check never skips.
  *
- *   node .testbin/toolout-check.mjs
- *   PI_WEB_JS=/path/to/pre-fix/pi-web.mjs node .testbin/toolout-check.mjs   # prove it bites
+ *   node test/toolout-check.mjs
+ *   PI_WEB_JS=/path/to/pre-fix/pi-web.mjs node test/toolout-check.mjs   # prove it bites
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { WEB } from './harness.mjs'
+import { TESTBIN, WEB } from './harness.mjs'
 
 const PORT = Number(process.env.TOOL_OUT_PORT || 8135)
 const BASE = `http://127.0.0.1:${PORT}`
@@ -40,7 +39,7 @@ const check = (ok, label, note = '') => {
   if (!ok) failed++
 }
 
-// Expected result text per tool — MUST match .testbin/fake-pi.mjs's scripted
+// Expected result text per tool — MUST match test/fake-pi.mjs's scripted
 // turn (that file is an executable fake, so these are copied, not imported).
 const EXPECT = {
   bash: 'hi\n',
@@ -83,7 +82,7 @@ function boot() {
     cwd: WEB,
     env: {
       ...process.env,
-      PATH: `${path.join(WEB, '.testbin')}:${process.env.PATH}`,
+      PATH: `${TESTBIN}:${process.env.PATH}`,
       PI_CODING_AGENT_DIR: agentDir,
       FAKE_PI_EXTRA_TOOL: EXTRA_TOOL,
     },
