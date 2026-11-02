@@ -21,9 +21,7 @@
 //   PI_WEB_JS=<other build> node test/titlefill-check.mjs   # prove it fails pre-fix
 import fs from 'node:fs'
 import path from 'node:path'
-import { WEB } from './harness.mjs'
-
-const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
+import { BRIDGE } from './harness.mjs'
 
 // The titler block: inline in a single-file build (PI_WEB_JS A/B), or in
 // lib/titles.mjs beside the entry after the split. Try both.
@@ -34,9 +32,9 @@ const block = (p) => {
     return null
   }
 }
-const m = block(PI_WEB) ?? block(path.join(path.dirname(PI_WEB), 'lib', 'titles.mjs'))
+const m = block(BRIDGE) ?? block(path.join(path.dirname(BRIDGE), 'lib', 'titles.mjs'))
 if (!m) {
-  console.log('FAIL no // <titler> … // </titler> block in ' + PI_WEB + ' (nor lib/titles.mjs beside it) — the check would assert nothing')
+  console.log('FAIL no // <titler> … // </titler> block in ' + BRIDGE + ' (nor lib/titles.mjs beside it) — the check would assert nothing')
   process.exit(1)
 }
 let titler

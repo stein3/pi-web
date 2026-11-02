@@ -16,11 +16,10 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
+import { BRIDGE, REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
 
 // PI_WEB_JS lets the check run against another copy (e.g. `git show HEAD:...`)
 // to confirm the assertions still catch the old bug.
-const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.DEL_CHECK_PORT || 8127)
 const BASE = `http://127.0.0.1:${PORT}`
 const CWD = REPO_CWD // the workspace the fixtures live in; CHECK_CWD overrides
@@ -72,7 +71,7 @@ writeSession(path.join(SDIR, 'trash', fname(LEGACY)), LEGACY, 'already deleted b
 
 const child = spawn(
   process.execPath,
-  [PI_WEB, '--port', String(PORT), '--host', '127.0.0.1', '--dir', scratch, '--cwd', CWD],
+  [BRIDGE, '--port', String(PORT), '--host', '127.0.0.1', '--dir', scratch, '--cwd', CWD],
   { cwd: WEB, env: { ...process.env, PATH: `${TESTBIN}:${process.env.PATH}` }, stdio: 'ignore', detached: true },
 )
 

@@ -39,9 +39,8 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { CHECK_PORT, REPO_CWD, TESTBIN, WEB } from './harness.mjs'
+import { BRIDGE, CHECK_PORT, REPO_CWD, TESTBIN, WEB } from './harness.mjs'
 
-const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.THINKING_CHECK_PORT || CHECK_PORT)
 const BASE = `http://127.0.0.1:${PORT}`
 const CWD = REPO_CWD
@@ -61,7 +60,7 @@ fs.mkdirSync(AGENT, { recursive: true })
 
 const child = spawn(
   process.execPath,
-  [PI_WEB, '--port', String(PORT), '--host', '127.0.0.1', '--dir', AGENT, '--cwd', CWD],
+  [BRIDGE, '--port', String(PORT), '--host', '127.0.0.1', '--dir', AGENT, '--cwd', CWD],
   {
     cwd: WEB,
     env: {

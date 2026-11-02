@@ -29,7 +29,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loadE2E, browserSkip, shotsDir, CHECK_PORT, ENGINE_PORT, WEB } from './harness.mjs'
+import { loadE2E, browserSkip, shotsDir, BRIDGE, CHECK_PORT, ENGINE_PORT, WEB } from './harness.mjs'
 import { startEngine } from './fake-engine.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -110,7 +110,7 @@ async function boot(env) {
   const child = spawn(
     process.execPath,
     [
-      process.env.PI_WEB_SCRIPT || path.join(WEB, 'pi-web.mjs'),
+      BRIDGE,
       '--port', String(PORT),
       '--dir', AGENT,
       '--cwd', SCRATCH,

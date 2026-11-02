@@ -39,7 +39,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { REPO, TESTBIN, WEB } from './harness.mjs'
+import { BRIDGE, TESTBIN, WEB } from './harness.mjs'
 import { loadWebuiClient, ui, webuiSkip, dropStream } from './webui-client.mjs'
 
 const PORT = Number(process.env.CHECK_PORT || 8127)
@@ -91,7 +91,7 @@ async function boot(env = {}) {
   fs.mkdirSync(agentDir, { recursive: true })
   child = spawn(
     process.execPath,
-    [process.env.PI_WEB_SCRIPT || path.join(WEB, 'pi-web.mjs'), '--port', String(PORT), '--dir', agentDir, '--cwd', scratch],
+    [BRIDGE, '--port', String(PORT), '--dir', agentDir, '--cwd', scratch],
     {
       cwd: WEB,
       env: {

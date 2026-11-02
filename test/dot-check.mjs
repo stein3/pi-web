@@ -42,12 +42,11 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { TESTBIN, WEB } from './harness.mjs'
+import { BRIDGE, TESTBIN, WEB } from './harness.mjs'
 import { loadWebuiClient, ui, webuiSkip } from './webui-client.mjs'
 
 const PORT = Number(process.env.CHECK_PORT || 8128)
 const BASE = `http://127.0.0.1:${PORT}`
-const PI_JS = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 let failed = 0
@@ -113,7 +112,7 @@ async function boot(env = {}) {
   scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dotcheck-'))
   agentDir = path.join(scratch, 'pi-agent')
   fs.mkdirSync(agentDir, { recursive: true })
-  child = spawn(process.execPath, [PI_JS, '--port', String(PORT), '--dir', agentDir, '--cwd', scratch], {
+  child = spawn(process.execPath, [BRIDGE, '--port', String(PORT), '--dir', agentDir, '--cwd', scratch], {
     cwd: WEB,
     env: {
       ...process.env,

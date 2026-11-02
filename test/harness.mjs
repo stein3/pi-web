@@ -15,6 +15,16 @@ export { TESTBIN }
 export const REPO = path.resolve(TESTBIN, '..')
 export const WEB = path.join(REPO, 'web')
 
+/**
+ * The bridge a check boots: an explicit A/B build wins — `PI_WEB_JS`, or the
+ * `PI_WEB_SCRIPT` some checks have always read (JS takes precedence if both are
+ * set) — else this repo's entry. Set it once and the WHOLE suite points at
+ * another tree, which is what makes "prove the check fails pre-fix" a one-flag
+ * job instead of 22 per-check overrides.
+ */
+export const BRIDGE =
+  process.env.PI_WEB_JS || process.env.PI_WEB_SCRIPT || path.join(WEB, 'pi-web.mjs')
+
 // screenshots from the browser checks (gitignored: web/.logs)
 export const SHOTS = process.env.SHOTS_DIR || path.join(WEB, '.logs')
 export function shotsDir() {

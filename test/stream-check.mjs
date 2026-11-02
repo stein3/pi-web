@@ -29,9 +29,8 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
+import { BRIDGE, REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
 
-const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.STREAM_CHECK_PORT || 8127)
 const BASE = `http://127.0.0.1:${PORT}`
 const CWD = REPO_CWD // CHECK_CWD overrides; the fixtures live in this workspace
@@ -126,7 +125,7 @@ async function waitLive(want, ms = 8000) {
 function spawnWeb(extraEnv) {
   return spawn(
     process.execPath,
-    [PI_WEB, '--port', String(PORT), '--host', '127.0.0.1', '--dir', scratch, '--cwd', CWD],
+    [BRIDGE, '--port', String(PORT), '--host', '127.0.0.1', '--dir', scratch, '--cwd', CWD],
     {
       cwd: WEB,
       env: {

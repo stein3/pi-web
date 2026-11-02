@@ -39,9 +39,8 @@ import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { WEB } from './harness.mjs'
+import { BRIDGE, WEB } from './harness.mjs'
 
-const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.FSBROWSE_CHECK_PORT || 8136)
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -177,7 +176,7 @@ function fixtures() {
 
 const servers = []
 const spawnBridge = (port, cwd) =>
-  spawn(process.execPath, [PI_WEB, '--port', String(port), '--host', '127.0.0.1', '--dir', AGENT, '--cwd', cwd], {
+  spawn(process.execPath, [BRIDGE, '--port', String(port), '--host', '127.0.0.1', '--dir', AGENT, '--cwd', cwd], {
     cwd: WEB,
     env: {
       ...process.env,

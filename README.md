@@ -114,10 +114,11 @@ Nothing in `test/` hard-codes an operator's directory any more: paths come from
 `sessionSlug`), and the fixtures' workspace is this repo unless `CHECK_CWD=`
 says otherwise.
 
-Every check accepts a build override for A/B against an older tree —
-`PI_WEB_SCRIPT=` (diff/compact), `PI_WEB_JS=` (delete/stream), plus
-`CENSUS_ONLY=1` and `DIFF_FIXTURE=` — because a check that can't fail isn't a
-check.
+Every check accepts a build override for A/B against an older tree:
+`PI_WEB_JS=` — or the `PI_WEB_SCRIPT=` some checks read first — resolves once,
+in `harness.mjs`'s `BRIDGE`, so one flag moves the whole suite at another tree.
+Plus `CENSUS_ONLY=1` and `DIFF_FIXTURE=`, because a check that can't fail isn't
+a check.
 
 ## Deliberately not wired
 

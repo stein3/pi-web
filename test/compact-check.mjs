@@ -21,7 +21,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { WEB } from './harness.mjs'
+import { BRIDGE, WEB } from './harness.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.CHECK_PORT || 8127)
@@ -158,7 +158,7 @@ async function boot(env) {
   fs.mkdirSync(AGENT, { recursive: true })
   const child = spawn(
     process.execPath,
-    [process.env.PI_WEB_SCRIPT || path.join(WEB, 'pi-web.mjs'), '--port', String(PORT), '--dir', AGENT, '--cwd', SCRATCH],
+    [BRIDGE, '--port', String(PORT), '--dir', AGENT, '--cwd', SCRATCH],
     {
       cwd: WEB,
       env: { ...process.env, PATH: `${HERE}:${process.env.PATH}`, PI_CODING_AGENT_DIR: AGENT, ...env },

@@ -233,8 +233,9 @@ from it. Re-deriving `..` in a check is how a moved suite breaks at HEAD.
 Every check is self-contained: it seeds fixtures, spawns `pi-web` against
 `test/fake-pi.mjs`, and kills its own child. A check must never depend
 on gitignored data (real transcripts, `config/pi-agent/`) — seed a fixture, or
-prefer one when it happens to exist. `PI_WEB_JS=` / `PI_WEB_SCRIPT=` point the
-same assertions at another build: prove the check **fails** on the pre-fix build
+prefer one when it happens to exist. `PI_WEB_JS=` / `PI_WEB_SCRIPT=` both resolve
+in one place — `harness.mjs`'s `BRIDGE` — so one flag points EVERY check at
+another build: prove the check **fails** on the pre-fix build
 before believing that it passes. `queue-check`, `ws-check`, `ui-check`,
 `time-check` and `box-check` need a live server / chromium / the sibling checkout
 and exit **2** with a SKIP message when it is missing — never a silent pass. The
@@ -264,9 +265,9 @@ testing anything).
   cache/input, and emit **no key** for an all-zero tally. Verify:
   `test/hist-check.mjs`.
 
-Paths in tests come from `test/harness.mjs` (`REPO`, `WEB`, `TESTBIN`, `SHOTS`,
-`E2E_HELPERS`, `CHECK_CWD`, `sessionSlug`); nothing may hard-code a machine's
-checkout.
+Paths in tests come from `test/harness.mjs` (`REPO`, `WEB`, `TESTBIN`, `BRIDGE`,
+`SHOTS`, `E2E_HELPERS`, `CHECK_CWD`, `sessionSlug`); nothing may hard-code a
+machine's checkout, and no check resolves the bridge dir for itself.
 
 ## Deploy
 

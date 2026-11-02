@@ -29,9 +29,8 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
+import { BRIDGE, TESTBIN, WEB, sessionSlug } from './harness.mjs'
 
-const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.CWD_CHECK_PORT || 8135)
 const BASE = `http://127.0.0.1:${PORT}`
 
@@ -110,7 +109,7 @@ async function main() {
   seed(path.join(AGENT, 'sessions', sessionSlug(WORKDIR), `2026-01-01T00-00-00-000Z_${B}.jsonl`), B, WORKDIR, 'a session in a live workspace')
   seed(path.join(AGENT, 'sessions', sessionSlug(FOREIGN), `2026-01-01T00-00-00-000Z_${C}.jsonl`), C, FOREIGN, 'a transcript from another machine')
 
-  srv = spawn(process.execPath, [PI_WEB, '--port', String(PORT), '--host', '127.0.0.1', '--dir', AGENT, '--cwd', WORKDIR], {
+  srv = spawn(process.execPath, [BRIDGE, '--port', String(PORT), '--host', '127.0.0.1', '--dir', AGENT, '--cwd', WORKDIR], {
     cwd: WEB,
     env: {
       ...process.env,

@@ -35,7 +35,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loadE2E, browserSkip, shotsDir, CHECK_PORT, WEB } from './harness.mjs'
+import { loadE2E, browserSkip, shotsDir, BRIDGE, CHECK_PORT, WEB } from './harness.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.FSBOX_CHECK_PORT || CHECK_PORT)
@@ -132,7 +132,7 @@ function boot() {
   const child = spawn(
     process.execPath,
     [
-      process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs'),
+      BRIDGE,
       '--port', String(PORT),
       '--host', '127.0.0.1',
       '--dir', AGENT,

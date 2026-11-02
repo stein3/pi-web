@@ -25,9 +25,8 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
+import { BRIDGE, REPO_CWD, TESTBIN, WEB, sessionSlug } from './harness.mjs'
 
-const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.REVERT_CHECK_PORT || 8133)
 const BASE = `http://127.0.0.1:${PORT}`
 const CWD = REPO_CWD
@@ -52,7 +51,7 @@ if (!(await fetch(`${BASE}/healthz`).then(() => null).catch(() => true))) {
 
 const child = spawn(
   process.execPath,
-  [PI_WEB, '--port', String(PORT), '--host', '127.0.0.1', '--dir', AGENT, '--cwd', CWD],
+  [BRIDGE, '--port', String(PORT), '--host', '127.0.0.1', '--dir', AGENT, '--cwd', CWD],
   {
     cwd: WEB,
     env: {

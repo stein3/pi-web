@@ -25,9 +25,8 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
-import { CHECK_PORT, ENGINE_PORT, REPO_CWD, TESTBIN, WEB } from './harness.mjs'
+import { BRIDGE, CHECK_PORT, ENGINE_PORT, REPO_CWD, TESTBIN, WEB } from './harness.mjs'
 
-const PI_WEB = process.env.PI_WEB_JS || path.join(WEB, 'pi-web.mjs')
 const PORT = Number(process.env.FILTER_CHECK_PORT || CHECK_PORT)
 const BASE = `http://127.0.0.1:${PORT}`
 const GATEWAY = `http://127.0.0.1:${ENGINE_PORT}`
@@ -166,7 +165,7 @@ let child = null
 async function spawnBridge() {
   child = spawn(
     process.execPath,
-    [PI_WEB, '--port', String(PORT), '--host', '127.0.0.1', '--dir', AGENT, '--cwd', REPO_CWD],
+    [BRIDGE, '--port', String(PORT), '--host', '127.0.0.1', '--dir', AGENT, '--cwd', REPO_CWD],
     {
       cwd: WEB,
       env: { ...process.env, PATH: `${BIN}:${TESTBIN}:${process.env.PATH}` },

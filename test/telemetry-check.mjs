@@ -38,7 +38,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startEngine } from './fake-engine.mjs'
-import { ENGINE_PORT, WEB } from './harness.mjs'
+import { BRIDGE, ENGINE_PORT, WEB } from './harness.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.CHECK_PORT || 8126)
@@ -133,7 +133,7 @@ async function boot(env, opts = {}) {
   if (!opts.noStore) writeStore(AGENT, opts.store || {})
   const child = spawn(
     process.execPath,
-    [process.env.PI_WEB_SCRIPT || path.join(WEB, 'pi-web.mjs'), '--port', String(PORT), '--dir', AGENT, '--cwd', SCRATCH],
+    [BRIDGE, '--port', String(PORT), '--dir', AGENT, '--cwd', SCRATCH],
     {
       cwd: WEB,
       env: { ...process.env, PATH: `${HERE}:${process.env.PATH}`, PI_CODING_AGENT_DIR: AGENT, ...env },
